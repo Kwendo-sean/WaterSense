@@ -92,6 +92,10 @@ docker compose up --build
 
 This starts PostgreSQL, the backend on port 8000, and nginx-served frontend on port 5173. Data persists in the `watersense_db` volume.
 
+## Deploy to a server
+
+Production deployment (VPS, host nginx, Let's Encrypt, `https://watersense.selenos.world`) uses `docker-compose.prod.yml` and the scripts in [deploy/](deploy/). Full walkthrough: [DEPLOYMENT.md](DEPLOYMENT.md).
+
 ## Environment
 
 Copy `.env.example` if you need overrides. Important values:
