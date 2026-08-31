@@ -1,0 +1,10 @@
+# Deploy artifacts are consumed by Linux. CRLF would break shebangs
+# ("bash: \r: command not found") and nginx config parsing.
+*.sh            text eol=lf
+*.conf          text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+Dockerfile      text eol=lf
+Dockerfile.*    text eol=lf
+.dockerignore   text eol=lf
+.env.example    text eol=lf

@@ -1,0 +1,94 @@
+# WaterSense AI - production stack (single shared VPS, behind host nginx)
+#
+# Activated by COMPOSE_FILE=docker-compose.prod.yml in /opt/watersense/.env,
+# so plain `docker compose ps|logs|exec` on the server uses this file.
+#
+# Only `web` publishes a host port, and only on 127.0.0.1. db and api are
+# reachable solely from inside the `watersense` docker network.
+
+name: watersense
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: watersense-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-watersense}
+      POSTGRES_USER: ${POSTGRES_USER:-watersense}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-watersense} -d ${POSTGRES_DB:-watersense}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  api:
+    build:
+      context: ./backend
+    image: watersense-api:latest
+    container_name: watersense-api
+    restart: unless-stopped
+    # IMPORTANT: exactly one uvicorn process. The telemetry simulator and the
+    # WebSocket ConnectionManager both live in-process; --workers >1 would run
+    # N simulators and split broadcasts across workers.
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --workers
+      - "1"
+      - --proxy-headers
+      - --forwarded-allow-ips
+      - "*"
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-watersense}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-watersense}
+      CORS_ORIGINS: https://${DOMAIN:?DOMAIN must be set in .env}
+      SIMULATOR_ENABLED: ${SIMULATOR_ENABLED:-true}
+      SIMULATOR_INTERVAL_SECONDS: ${SIMULATOR_INTERVAL_SECONDS:-3}
+      PYTHONUNBUFFERED: "1"
+      TZ: ${TZ:-Africa/Nairobi}
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health',timeout=4).status==200 else 1)"
+      interval: 15s
+      timeout: 10s
+      retries: 6
+      start_period: 45s
+
+  web:
+    build:
+      context: ./frontend
+      args:
+        NGINX_CONF: nginx.prod.conf
+        # Baked into the JS bundle at build time - changing DOMAIN requires a
+        # rebuild (deploy.sh always builds).
+        VITE_API_URL: https://${DOMAIN}
+        VITE_WS_URL: wss://${DOMAIN}/ws/live
+    image: watersense-web:latest
+    container_name: watersense-web
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${WEB_PORT:-8770}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/api/v1/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 6
+      start_period: 20s
+
+volumes:
+  postgres_data:
