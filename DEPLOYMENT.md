@@ -39,12 +39,11 @@ The telemetry simulator and the WebSocket `ConnectionManager` both live in the P
    ```
    It installs Docker (if missing), creates a `watersense` user, makes `/opt/watersense` and `/var/backups/watersense`, and installs a nightly backup cron. **It does NOT clone the repo** — that's step 3.
 
-3. **Clone the repo** as the `watersense` user. The repo is public, so no credentials are needed:
+3. **Clone the repo** as the `watersense` user. The repo is public, so no credentials are needed. Run this **as root** — `sudo -u` rather than `sudo -iu`, so you stay in your root shell:
    ```bash
-   sudo -iu watersense
-   git clone https://github.com/Kwendo-sean/WaterSense.git /opt/watersense
-   cd /opt/watersense
+   sudo -u watersense git clone https://github.com/Kwendo-sean/WaterSense.git /opt/watersense
    ```
+   > `sudo -iu watersense` opens an *interactive login shell*; any further commands you paste get swallowed by it. And `watersense` is a `--system` account with no password and no sudo rights, so `sudo` fails from inside it. Do the root-level steps (5, 6) as root, and use `sudo -u watersense <cmd>` for the app-level ones.
    <details>
    <summary>If you later make the repo private</summary>
 
@@ -61,15 +60,17 @@ The telemetry simulator and the WebSocket `ConnectionManager` both live in the P
    ```
    </details>
 
-4. **Fill in env**:
+4. **Fill in env.** As root, generate the password and write it in without an editor:
    ```bash
-   cd /opt/watersense
-   cp deploy/.env.example .env
-   openssl rand -base64 32          # paste as POSTGRES_PASSWORD
-   nano .env                        # DOMAIN, POSTGRES_PASSWORD, WEB_PORT
-   chmod 600 .env
+   sudo -u watersense cp /opt/watersense/deploy/.env.example /opt/watersense/.env
+   PW=$(openssl rand -hex 32)
+   sudo -u watersense sed -i "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=${PW}|" /opt/watersense/.env
+   sudo -u watersense chmod 600 /opt/watersense/.env
+   unset PW
    ```
-   `DOMAIN=watersense.selenos.world` is already the default. `WEB_PORT` defaults to 8770 — Selene uses 8765, so they don't collide.
+   `DOMAIN=watersense.selenos.world` and `WEB_PORT=8770` are already the defaults (Selene uses 8765, so they don't collide). `POSTGRES_PASSWORD` is the only required value.
+
+   **Use hex, not base64.** The password is interpolated into `postgresql+psycopg://user:PASSWORD@db:5432/db`; base64's `/`, `+` and `=` corrupt that URL. `deploy.sh` rejects a password outside `[A-Za-z0-9._~-]` rather than letting you find out via a confusing connection error.
 
 5. **Hook into the host nginx**:
    ```bash

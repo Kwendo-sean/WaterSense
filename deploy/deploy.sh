@@ -24,7 +24,16 @@ fail() { printf '\n\033[1;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 set -a; source .env; set +a
 
 [[ -n "${DOMAIN:-}" ]]            || fail "DOMAIN not set in .env"
-[[ -n "${POSTGRES_PASSWORD:-}" ]] || fail "POSTGRES_PASSWORD not set in .env (openssl rand -base64 32)"
+[[ -n "${POSTGRES_PASSWORD:-}" ]] || fail "POSTGRES_PASSWORD not set in .env (openssl rand -hex 32)"
+
+# POSTGRES_PASSWORD lands inside postgresql+psycopg://user:PASS@db:5432/db, so
+# URL-significant characters silently corrupt the connection string.
+if [[ "$POSTGRES_PASSWORD" =~ [^A-Za-z0-9._~-] ]]; then
+  fail "POSTGRES_PASSWORD contains characters that break the DATABASE_URL (/, +, =, @, :, #, ...).
+       Use only [A-Za-z0-9._~-] - e.g. openssl rand -hex 32
+       If the DB volume already exists, rotate the password inside postgres too:
+         docker compose exec db psql -U ${POSTGRES_USER:-watersense} -c \"ALTER USER ${POSTGRES_USER:-watersense} WITH PASSWORD 'newpass';\""
+fi
 
 COMPOSE="docker compose -f docker-compose.prod.yml"
 
