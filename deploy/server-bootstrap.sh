@@ -90,11 +90,11 @@ cat <<EOF
 
 Next:
   1. sudo -iu $APP_USER
-  2. ssh-keygen -t ed25519 -C "watersense-deploy@\$(hostname)" -f ~/.ssh/id_ed25519 -N ''
-     cat ~/.ssh/id_ed25519.pub     # add to GitHub -> repo -> Settings -> Deploy keys (read-only)
-  3. git clone git@github.com:<you>/WaterSense.git $APP_DIR
-  4. cd $APP_DIR && cp deploy/.env.example .env && nano .env && chmod 600 .env
-  5. host nginx + certbot, then: bash deploy/deploy.sh
+  2. git clone https://github.com/Kwendo-sean/WaterSense.git $APP_DIR
+  3. cd $APP_DIR && cp deploy/.env.example .env && nano .env && chmod 600 .env
+     (POSTGRES_PASSWORD is required: openssl rand -base64 32)
+  4. host nginx site + certbot  (see DEPLOYMENT.md steps 5-6)
+  5. bash deploy/deploy.sh
 
 Full walkthrough: $APP_DIR/DEPLOYMENT.md
 EOF

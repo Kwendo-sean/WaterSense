@@ -34,22 +34,32 @@ The telemetry simulator and the WebSocket `ConnectionManager` both live in the P
 
 2. **SSH in as root** and bootstrap the box. Safe on a shared server — it skips Docker if Docker is already installed, doesn't touch your firewall, doesn't touch nginx/postgres/redis or the Selene stack:
    ```bash
-   curl -fsSL https://raw.githubusercontent.com/<you>/WaterSense/main/deploy/server-bootstrap.sh -o bootstrap.sh
+   curl -fsSL https://raw.githubusercontent.com/Kwendo-sean/WaterSense/main/deploy/server-bootstrap.sh -o bootstrap.sh
    sudo bash bootstrap.sh
    ```
-   It installs Docker (if missing), creates a `watersense` user, makes `/opt/watersense` and `/var/backups/watersense`, and installs a nightly backup cron. **It does NOT clone the repo yet** — you need a deploy key first (step 3).
+   It installs Docker (if missing), creates a `watersense` user, makes `/opt/watersense` and `/var/backups/watersense`, and installs a nightly backup cron. **It does NOT clone the repo** — that's step 3.
 
-3. **Deploy key for the repo** (safer than FileZilla, and unattended):
+3. **Clone the repo** as the `watersense` user. The repo is public, so no credentials are needed:
+   ```bash
+   sudo -iu watersense
+   git clone https://github.com/Kwendo-sean/WaterSense.git /opt/watersense
+   cd /opt/watersense
+   ```
+   <details>
+   <summary>If you later make the repo private</summary>
+
+   Add a read-only deploy key so `deploy.sh` can still `git pull` unattended:
    ```bash
    sudo -iu watersense
    ssh-keygen -t ed25519 -C "watersense-deploy@$(hostname)" -f ~/.ssh/id_ed25519 -N ''
    cat ~/.ssh/id_ed25519.pub
    ```
-   Paste the public key into GitHub → your repo → **Settings → Deploy keys → Add deploy key**. Leave "Allow write access" OFF. Then clone:
+   Paste the public key into GitHub → repo → **Settings → Deploy keys → Add deploy key**, "Allow write access" OFF. Then switch the remote:
    ```bash
-   git clone git@github.com:<you>/WaterSense.git /opt/watersense
+   cd /opt/watersense
+   git remote set-url origin git@github.com:Kwendo-sean/WaterSense.git
    ```
-   (Public repo? `git clone https://github.com/<you>/WaterSense.git /opt/watersense` and skip the key.)
+   </details>
 
 4. **Fill in env**:
    ```bash
