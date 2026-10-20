@@ -7,10 +7,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select, desc, func
 from sqlalchemy.exc import IntegrityError
 from .core import Base, engine, SessionLocal
-from .models import Station, TelemetryReading, RiskAssessment, Alert, Forecast
+from .models import Station, TelemetryReading, RiskAssessment, Alert, Forecast, PumpEvent
 from .schemas import TelemetryIn, StationIn, StationPatch
 from .services.risk import assess_risk
 from .services.forecast import calculate_forecast
+from .services.pump import evaluate_pump, predict_pump_schedule
 from .seed import seed_database
 from .simulator import simulator
 
@@ -21,7 +22,10 @@ def iso(value):
     return value
 
 def station_dict(s):
-    return {"id":s.id,"station_code":s.station_code,"name":s.name,"description":s.description,"station_type":s.station_type,"latitude":s.latitude,"longitude":s.longitude,"location_text":s.location_text,"status":s.status,"installed_at":iso(s.installed_at),"last_seen_at":iso(s.last_seen_at),"source_type":s.source_type,"created_at":iso(s.created_at),"updated_at":iso(s.updated_at)}
+    return {"id":s.id,"station_code":s.station_code,"name":s.name,"description":s.description,"station_type":s.station_type,"latitude":s.latitude,"longitude":s.longitude,"location_text":s.location_text,"status":s.status,"installed_at":iso(s.installed_at),"last_seen_at":iso(s.last_seen_at),"source_type":s.source_type,"created_at":iso(s.created_at),"updated_at":iso(s.updated_at),"pump_status":s.pump_status,"pump_capacity_liters":s.pump_capacity_liters}
+
+def pump_event_dict(e):
+    return {"id":e.id,"station_id":e.station_id,"triggered_at":iso(e.triggered_at),"trigger_level":e.trigger_level,"stopped_at":iso(e.stopped_at),"stop_level":e.stop_level,"volume_liters":e.volume_liters}
 
 def reading_dict(r):
     return {"id":r.id,"station_id":r.station_id,"timestamp":iso(r.timestamp),"ph":r.ph,"turbidity_ntu":r.turbidity_ntu,"temperature_c":r.temperature_c,"conductivity_us_cm":r.conductivity_us_cm,"tds_ppm":r.tds_ppm,"water_level_percent":r.water_level_percent,"flow_rate_l_min":r.flow_rate_l_min,"battery_percent":r.battery_percent,"signal_strength":r.signal_strength,"source":r.source}
@@ -68,12 +72,24 @@ async def ingest_payload(payload: dict[str,Any]):
             if forecast:
                 metadata={**forecast,"forecast_for":forecast["forecast_for"].isoformat()}
                 db.add(Forecast(station_id=station.id,forecast_for=forecast["forecast_for"],predicted_value=15,confidence=forecast["confidence"],forecast_metadata=metadata))
+        pump_changed=None
+        if metrics.get("water_level_percent") is not None:
+            new_pump_status,action=evaluate_pump(station.pump_status,metrics["water_level_percent"],station.pump_capacity_liters)
+            if action:
+                if action[0]=="start":
+                    db.add(PumpEvent(station_id=station.id,triggered_at=reading.timestamp,trigger_level=action[1]))
+                elif action[0]=="stop":
+                    open_event=db.scalar(select(PumpEvent).where(PumpEvent.station_id==station.id,PumpEvent.stopped_at.is_(None)).order_by(desc(PumpEvent.triggered_at)))
+                    if open_event: open_event.stopped_at=reading.timestamp;open_event.stop_level=action[2];open_event.volume_liters=action[3]
+                station.pump_status=new_pump_status
+                pump_changed={"station_id":station.id,"station_code":station.station_code,"pump_status":new_pump_status,"water_level_percent":metrics["water_level_percent"],"timestamp":iso(reading.timestamp)}
         db.commit()
-        rd=reading_dict(reading);ra=risk_dict(assessment)
+        rd=reading_dict(reading);ra=risk_dict(assessment);sd=station_dict(station)
     finally: db.close()
-    await manager.broadcast("telemetry:new",{"station":station_dict(station),"reading":rd,"risk":ra})
+    await manager.broadcast("telemetry:new",{"station":sd,"reading":rd,"risk":ra})
     await manager.broadcast("risk:new",ra)
     if previous!=result["risk_level"]: await manager.broadcast("station:status_changed",{"station_id":station.id,"station_code":station.station_code,"previous":previous,"current":result["risk_level"],"risk_score":result["overall_risk_score"],"timestamp":iso(reading.timestamp)})
+    if pump_changed: await manager.broadcast("pump:changed",pump_changed)
     if alert: await manager.broadcast("alert:new",alert_dict(alert))
     return {"accepted":True,"reading_id":reading.id,"station_status":result["risk_level"],"risk_score":result["overall_risk_score"],"assessment_id":assessment.id}
 
@@ -148,6 +164,15 @@ def station_forecast(station_id:int):
         if not row:return {"available":False,"reason":"Insufficient declining water-level history"}
         return {"available":True,"id":row.id,"station_id":row.station_id,"forecast_for":iso(row.forecast_for),"predicted_value":row.predicted_value,"confidence":row.confidence,"metadata":row.forecast_metadata}
 
+@app.get("/api/v1/stations/{station_id}/pump")
+def station_pump(station_id:int):
+    with SessionLocal() as db:
+        station=db.get(Station,station_id)
+        if not station:raise HTTPException(404,"Station not found")
+        events=db.scalars(select(PumpEvent).where(PumpEvent.station_id==station_id,PumpEvent.stopped_at.is_not(None)).order_by(desc(PumpEvent.triggered_at)).limit(60)).all()
+        prediction=predict_pump_schedule([{"triggered_at":e.triggered_at,"volume_liters":e.volume_liters} for e in events])
+        return {"station_id":station.id,"pump_status":station.pump_status,"capacity_liters":station.pump_capacity_liters,"recent_events":[pump_event_dict(e) for e in events[:10]],"prediction":prediction}
+
 @app.get("/api/v1/alerts")
 def alerts(resolved:bool|None=None):
     with SessionLocal() as db:
@@ -182,6 +207,17 @@ def dashboard_summary():
         risk_penalty=counts["watch"]*5+counts["warning"]*12+counts["critical"]*24
         avg=lambda key:round(sum(getattr(r,key) for r in readings if getattr(r,key) is not None)/max(1,sum(getattr(r,key) is not None for r in readings)),1)
         return {"network_health":max(0,100-risk_penalty),"stations":len(sts),"status_counts":counts,"avg_ph":avg("ph"),"avg_turbidity":avg("turbidity_ntu"),"water_availability":avg("water_level_percent"),"active_alerts":active,"readings_processed":db.scalar(select(func.count()).select_from(TelemetryReading))}
+
+@app.get("/api/v1/dashboard/pumps")
+def dashboard_pumps():
+    with SessionLocal() as db:
+        stations=db.scalars(select(Station).where(Station.station_type=="tank").order_by(Station.station_code)).all()
+        out=[]
+        for s in stations:
+            events=db.scalars(select(PumpEvent).where(PumpEvent.station_id==s.id,PumpEvent.stopped_at.is_not(None)).order_by(desc(PumpEvent.triggered_at)).limit(60)).all()
+            prediction=predict_pump_schedule([{"triggered_at":e.triggered_at,"volume_liters":e.volume_liters} for e in events])
+            out.append({"station_id":s.id,"station_code":s.station_code,"name":s.name,"pump_status":s.pump_status,"capacity_liters":s.pump_capacity_liters,"prediction":prediction})
+        return out
 
 @app.get("/api/v1/dashboard/activity")
 def activity(limit:int=20):

@@ -2,9 +2,10 @@ from datetime import datetime,timedelta,timezone
 import math,random
 from sqlalchemy import select,func
 from .core import SessionLocal
-from .models import Station,TelemetryReading,RiskAssessment,Alert,Forecast
+from .models import Station,TelemetryReading,RiskAssessment,Alert,Forecast,PumpEvent
 from .services.risk import assess_risk
 from .services.forecast import calculate_forecast
+from .services.pump import LOW_THRESHOLD,HIGH_THRESHOLD
 
 STATIONS=[
 ("WS-NBI-001","Karura Reservoir Demo","reservoir",-1.2358,36.8328,"Karura, Nairobi"),
@@ -47,6 +48,17 @@ def seed_database():
             if f:
                 metadata={**f,"forecast_for":f["forecast_for"].isoformat()}
                 db.add(Forecast(station_id=st.id,forecast_for=f["forecast_for"],predicted_value=15,confidence=f["confidence"],forecast_metadata=metadata))
+            # Seed two refill cycles a day for the past two weeks so the pump-scheduling
+            # prediction has a real pattern to aggregate on first load, not an empty state.
+            for day in range(14,0,-1):
+                for hour in (6,18):
+                    trigger=now-timedelta(days=day,hours=-hour)+timedelta(minutes=random.uniform(-15,15))
+                    trigger_level=LOW_THRESHOLD+random.uniform(-2,2)
+                    stop_level=HIGH_THRESHOLD+random.uniform(-2,2)
+                    volume=max(0.0,(stop_level-trigger_level)/100*st.pump_capacity_liters)
+                    stopped=trigger+timedelta(minutes=random.uniform(25,50))
+                    db.add(PumpEvent(station_id=st.id,triggered_at=trigger,trigger_level=trigger_level,stopped_at=stopped,stop_level=stop_level,volume_liters=volume))
+            st.pump_status="off"
     db.flush()
     nodes=db.scalars(select(Station).order_by(Station.id)).all()
     for i in range(5):

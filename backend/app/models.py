@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from sqlalchemy import String, Float, DateTime, Boolean, ForeignKey, JSON, Integer
+from sqlalchemy import String, Float, DateTime, Boolean, ForeignKey, JSON, Integer, Index
 from sqlalchemy.orm import Mapped, mapped_column
 from .core import Base
 
@@ -21,6 +21,18 @@ class Station(Base):
     source_type: Mapped[str]=mapped_column(String, default="simulator")
     created_at: Mapped[datetime]=mapped_column(DateTime, default=now)
     updated_at: Mapped[datetime]=mapped_column(DateTime, default=now, onupdate=now)
+    pump_status: Mapped[str]=mapped_column(String, default="off")
+    pump_capacity_liters: Mapped[float]=mapped_column(Float, default=5000.0)
+
+class PumpEvent(Base):
+    __tablename__="pump_events"
+    id: Mapped[int]=mapped_column(primary_key=True)
+    station_id: Mapped[int]=mapped_column(ForeignKey("stations.id"), index=True)
+    triggered_at: Mapped[datetime]=mapped_column(DateTime, default=now)
+    trigger_level: Mapped[float]=mapped_column(Float)
+    stopped_at: Mapped[datetime|None]=mapped_column(DateTime, nullable=True)
+    stop_level: Mapped[float|None]=mapped_column(Float, nullable=True)
+    volume_liters: Mapped[float|None]=mapped_column(Float, nullable=True)
 
 class TelemetryReading(Base):
     __tablename__="telemetry_readings"
@@ -38,6 +50,10 @@ class TelemetryReading(Base):
     signal_strength: Mapped[float|None]=mapped_column(Float, nullable=True)
     source: Mapped[str]=mapped_column(String, default="simulator")
     raw_payload: Mapped[dict]=mapped_column(JSON, default=dict)
+    __table_args__=(Index("ix_telemetry_station_ts","station_id","timestamp"),)
+    # Hot-patched directly on the live DB during a 2026-09 incident (2.19M rows,
+    # unindexed per-station history lookups stalling the event loop). Codified
+    # here so a fresh deploy or volume rebuild doesn't silently lose the fix.
 
 class RiskAssessment(Base):
     __tablename__="risk_assessments"

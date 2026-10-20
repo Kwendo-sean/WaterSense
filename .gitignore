@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 *.db
+*.db-journal
 .pytest_cache/
 node_modules/
 dist/
