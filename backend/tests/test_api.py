@@ -4,9 +4,12 @@ from fastapi.testclient import TestClient
 from app.main import app
 
 
+ADMIN = {"X-Admin-Key": "test-admin-key"}
+
+
 def test_health_and_telemetry_pipeline():
     with TestClient(app) as client:
-        stations = client.get("/api/v1/stations").json()
+        stations = client.get("/api/v1/stations", headers=ADMIN).json()
         assert len(stations) >= 12
         code = stations[0]["station_code"]
         response = client.post("/api/v1/telemetry", json={
@@ -18,7 +21,7 @@ def test_health_and_telemetry_pipeline():
         body = response.json()
         assert body["accepted"] is True
         assert body["reading_id"]
-        latest = client.get(f"/api/v1/stations/{stations[0]['id']}/latest")
+        latest = client.get(f"/api/v1/stations/{stations[0]['id']}/latest", headers=ADMIN)
         assert latest.status_code == 200
 
 

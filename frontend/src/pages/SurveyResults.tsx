@@ -1,4 +1,4 @@
-import {useState} from "react";import {useQuery} from "@tanstack/react-query";import {Link} from "react-router-dom";import {ArrowLeft,Download} from "lucide-react";import {api,API} from "../api";import {Logo,Loading,ErrorState} from "../components/Shared";
+import {useState} from "react";import {useQuery} from "@tanstack/react-query";import {Link} from "react-router-dom";import {ArrowLeft,Download} from "lucide-react";import {api,API,getAdminKey,setAdminKey,clearAdminKey} from "../api";import {Logo,Loading,ErrorState} from "../components/Shared";
 
 function Bar({label,count,pct}:{label:string;count:number;pct:number}){return <div className="survey-bar-row"><div className="survey-bar-label"><span>{label}</span><b>{count} · {pct}%</b></div><div className="survey-bar-track"><i style={{width:`${Math.min(100,pct)}%`}}/></div></div>}
 
@@ -8,11 +8,11 @@ function Block({title,denomNote,rows}:{title:string;denomNote?:string;rows:{opti
 }
 
 export default function SurveyResults(){
-  const [key,setKey]=useState(()=>sessionStorage.getItem("survey_admin_key")||"");
+  const [key,setKey]=useState(()=>getAdminKey());
   const [input,setInput]=useState("");
   const results=useQuery({queryKey:["survey-results",key],queryFn:()=>api.surveyResults(key),enabled:!!key,retry:false});
 
-  function trySubmitKey(){sessionStorage.setItem("survey_admin_key",input);setKey(input)}
+  function trySubmitKey(){setAdminKey(input);setKey(input)}
 
   async function exportCsv(){
     const r=await fetch(`${API}/api/v1/survey/export`,{headers:{"X-Admin-Key":key}});
@@ -22,7 +22,7 @@ export default function SurveyResults(){
   }
 
   if(!key||results.error){
-    if(results.error)sessionStorage.removeItem("survey_admin_key");
+    if(results.error)clearAdminKey();
     return <main className="survey-admin-gate"><Logo dark/><h1>Research team access</h1><p>Enter the admin key to view survey results.</p>{results.error&&<p className="survey-error">Access denied — check the key and try again.</p>}<input type="password" value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>e.key==="Enter"&&trySubmitKey()} placeholder="Admin key"/><button onClick={trySubmitKey}>Continue</button></main>;
   }
   if(results.isLoading)return <div className="survey-admin"><Loading/></div>;

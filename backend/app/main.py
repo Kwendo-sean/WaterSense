@@ -106,15 +106,23 @@ app=FastAPI(title="WaterSense AI API",version="1.0.0",lifespan=lifespan)
 origins=os.getenv("CORS_ORIGINS","http://localhost:5173,http://127.0.0.1:5173").split(",")
 app.add_middleware(CORSMiddleware,allow_origins=origins,allow_credentials=True,allow_methods=["*"],allow_headers=["*"])
 
+# Shared operator password gating the dashboard, station views and simulator
+# controls (same key used for the survey admin pages). No user accounts exist
+# yet, so this is a single shared secret, not per-user auth.
+ADMIN_KEY=os.getenv("SURVEY_ADMIN_KEY","")
+def require_admin(x_admin_key:str|None=Header(None)):
+    if not ADMIN_KEY or x_admin_key!=ADMIN_KEY:
+        raise HTTPException(401,"Unauthorized")
+
 @app.get("/api/v1/health")
 def health(): return {"status":"healthy","service":"watersense-api","simulator":simulator.running}
 
 @app.get("/api/v1/stations")
-def stations():
+def stations(_:None=Depends(require_admin)):
     with SessionLocal() as db:return [station_dict(x) for x in db.scalars(select(Station).order_by(Station.station_code)).all()]
 
 @app.post("/api/v1/stations",status_code=201)
-def create_station(data:StationIn):
+def create_station(data:StationIn,_:None=Depends(require_admin)):
     with SessionLocal() as db:
         item=Station(**data.model_dump());db.add(item)
         try:db.commit()
@@ -122,14 +130,14 @@ def create_station(data:StationIn):
         return station_dict(item)
 
 @app.get("/api/v1/stations/{station_id}")
-def get_station(station_id:int):
+def get_station(station_id:int,_:None=Depends(require_admin)):
     with SessionLocal() as db:
         item=db.get(Station,station_id)
         if not item:raise HTTPException(404,"Station not found")
         return station_dict(item)
 
 @app.patch("/api/v1/stations/{station_id}")
-def patch_station(station_id:int,data:StationPatch):
+def patch_station(station_id:int,data:StationPatch,_:None=Depends(require_admin)):
     with SessionLocal() as db:
         item=db.get(Station,station_id)
         if not item:raise HTTPException(404,"Station not found")
@@ -140,14 +148,14 @@ def patch_station(station_id:int,data:StationPatch):
 async def telemetry(data:TelemetryIn):return await ingest_payload(data.model_dump())
 
 @app.get("/api/v1/stations/{station_id}/telemetry")
-def telemetry_history(station_id:int,limit:int=Query(100,ge=1,le=2000)):
+def telemetry_history(station_id:int,limit:int=Query(100,ge=1,le=2000),_:None=Depends(require_admin)):
     with SessionLocal() as db:
         if not db.get(Station,station_id):raise HTTPException(404,"Station not found")
         rows=db.scalars(select(TelemetryReading).where(TelemetryReading.station_id==station_id).order_by(desc(TelemetryReading.timestamp)).limit(limit)).all()
         return [reading_dict(x) for x in reversed(rows)]
 
 @app.get("/api/v1/stations/{station_id}/latest")
-def latest(station_id:int):
+def latest(station_id:int,_:None=Depends(require_admin)):
     with SessionLocal() as db:
         station=db.get(Station,station_id)
         if not station:raise HTTPException(404,"Station not found")
@@ -156,41 +164,43 @@ def latest(station_id:int):
         return {"station":station_dict(station),"reading":reading_dict(reading) if reading else None,"risk":risk_dict(risk) if risk else None}
 
 @app.get("/api/v1/stations/{station_id}/risk")
-def station_risk(station_id:int,limit:int=Query(100,ge=1,le=1000)):
+def station_risk(station_id:int,limit:int=Query(100,ge=1,le=1000),_:None=Depends(require_admin)):
     with SessionLocal() as db:return [risk_dict(x) for x in reversed(db.scalars(select(RiskAssessment).where(RiskAssessment.station_id==station_id).order_by(desc(RiskAssessment.timestamp)).limit(limit)).all())]
 
 @app.get("/api/v1/stations/{station_id}/forecast")
-def station_forecast(station_id:int):
+def station_forecast(station_id:int,_:None=Depends(require_admin)):
     with SessionLocal() as db:
         row=db.scalar(select(Forecast).where(Forecast.station_id==station_id).order_by(desc(Forecast.created_at)))
         if not row:return {"available":False,"reason":"Insufficient declining water-level history"}
         return {"available":True,"id":row.id,"station_id":row.station_id,"forecast_for":iso(row.forecast_for),"predicted_value":row.predicted_value,"confidence":row.confidence,"metadata":row.forecast_metadata}
 
 @app.get("/api/v1/stations/{station_id}/pump")
-def station_pump(station_id:int):
+def station_pump(station_id:int,_:None=Depends(require_admin)):
     with SessionLocal() as db:
         station=db.get(Station,station_id)
         if not station:raise HTTPException(404,"Station not found")
         events=db.scalars(select(PumpEvent).where(PumpEvent.station_id==station_id,PumpEvent.stopped_at.is_not(None)).order_by(desc(PumpEvent.triggered_at)).limit(60)).all()
         prediction=predict_pump_schedule([{"triggered_at":e.triggered_at,"volume_liters":e.volume_liters} for e in events])
-        return {"station_id":station.id,"pump_status":station.pump_status,"capacity_liters":station.pump_capacity_liters,"recent_events":[pump_event_dict(e) for e in events[:10]],"prediction":prediction}
+        total_volume_liters=db.scalar(select(func.sum(PumpEvent.volume_liters)).where(PumpEvent.station_id==station_id,PumpEvent.stopped_at.is_not(None))) or 0.0
+        total_cycles=db.scalar(select(func.count()).select_from(PumpEvent).where(PumpEvent.station_id==station_id,PumpEvent.stopped_at.is_not(None))) or 0
+        return {"station_id":station.id,"pump_status":station.pump_status,"capacity_liters":station.pump_capacity_liters,"recent_events":[pump_event_dict(e) for e in events[:10]],"prediction":prediction,"total_volume_liters":round(total_volume_liters,1),"total_cycles":total_cycles}
 
 @app.get("/api/v1/alerts")
-def alerts(resolved:bool|None=None):
+def alerts(resolved:bool|None=None,_:None=Depends(require_admin)):
     with SessionLocal() as db:
         q=select(Alert).order_by(desc(Alert.created_at))
         if resolved is not None:q=q.where(Alert.resolved==resolved)
         return [alert_dict(x) for x in db.scalars(q).all()]
 
 @app.patch("/api/v1/alerts/{alert_id}/acknowledge")
-async def acknowledge(alert_id:int):
+async def acknowledge(alert_id:int,_:None=Depends(require_admin)):
     with SessionLocal() as db:
         item=db.get(Alert,alert_id)
         if not item:raise HTTPException(404,"Alert not found")
         item.acknowledged=True;db.commit();return alert_dict(item)
 
 @app.patch("/api/v1/alerts/{alert_id}/resolve")
-async def resolve(alert_id:int):
+async def resolve(alert_id:int,_:None=Depends(require_admin)):
     with SessionLocal() as db:
         item=db.get(Alert,alert_id)
         if not item:raise HTTPException(404,"Alert not found")
@@ -198,7 +208,7 @@ async def resolve(alert_id:int):
     await manager.broadcast("alert:resolved",out);return out
 
 @app.get("/api/v1/dashboard/summary")
-def dashboard_summary():
+def dashboard_summary(_:None=Depends(require_admin)):
     with SessionLocal() as db:
         sts=db.scalars(select(Station)).all();counts={k:sum(s.status==k for s in sts) for k in ("safe","watch","warning","critical")}
         readings=[]
@@ -211,7 +221,7 @@ def dashboard_summary():
         return {"network_health":max(0,100-risk_penalty),"stations":len(sts),"status_counts":counts,"avg_ph":avg("ph"),"avg_turbidity":avg("turbidity_ntu"),"water_availability":avg("water_level_percent"),"active_alerts":active,"readings_processed":db.scalar(select(func.count()).select_from(TelemetryReading))}
 
 @app.get("/api/v1/dashboard/pumps")
-def dashboard_pumps():
+def dashboard_pumps(_:None=Depends(require_admin)):
     with SessionLocal() as db:
         stations=db.scalars(select(Station).where(Station.station_type=="tank").order_by(Station.station_code)).all()
         out=[]
@@ -222,20 +232,20 @@ def dashboard_pumps():
         return out
 
 @app.get("/api/v1/dashboard/activity")
-def activity(limit:int=20):
+def activity(limit:int=20,_:None=Depends(require_admin)):
     with SessionLocal() as db:
         rows=db.scalars(select(RiskAssessment).order_by(desc(RiskAssessment.timestamp)).limit(limit)).all()
         stations={s.id:s for s in db.scalars(select(Station)).all()}
         return [{"id":r.id,"timestamp":iso(r.timestamp),"station_id":r.station_id,"station_code":stations[r.station_id].station_code,"station_name":stations[r.station_id].name,"risk_level":r.risk_level,"risk_score":r.overall_risk_score,"message":r.detected_factors[0] if r.detected_factors else "Telemetry stable"} for r in rows]
 
 @app.post("/api/v1/simulator/start")
-async def start_simulator():await simulator.start();return {"running":simulator.running,"interval_seconds":simulator.interval}
+async def start_simulator(_:None=Depends(require_admin)):await simulator.start();return {"running":simulator.running,"interval_seconds":simulator.interval}
 @app.post("/api/v1/simulator/stop")
-async def stop_simulator():await simulator.stop();return {"running":simulator.running}
+async def stop_simulator(_:None=Depends(require_admin)):await simulator.stop();return {"running":simulator.running}
 @app.get("/api/v1/simulator/status")
-def simulator_status():return {"running":simulator.running,"interval_seconds":simulator.interval,"scenarios":simulator.scenarios}
+def simulator_status(_:None=Depends(require_admin)):return {"running":simulator.running,"interval_seconds":simulator.interval,"scenarios":simulator.scenarios}
 @app.post("/api/v1/simulator/scenario")
-def scenario(payload:dict):
+def scenario(payload:dict,_:None=Depends(require_admin)):
     station_id=payload.get("station_id");scenario_name=payload.get("scenario","NORMAL")
     if not station_id:raise HTTPException(422,"station_id is required")
     with SessionLocal() as db:
@@ -243,14 +253,9 @@ def scenario(payload:dict):
     simulator.set_scenario(station_id,scenario_name,payload.get("intensity",1),payload.get("overrides"));return {"accepted":True,"station_id":station_id,"scenario":scenario_name.upper()}
 
 # -------- Market research survey --------
-SURVEY_ADMIN_KEY=os.getenv("SURVEY_ADMIN_KEY","")
 SURVEY_RATE_LIMIT=5          # max submissions
 SURVEY_RATE_WINDOW=3600.0    # per hour, per IP, in-memory (single-process app)
 _survey_submit_times:dict[str,list[float]]=defaultdict(list)
-
-def require_survey_admin(x_admin_key:str|None=Header(None)):
-    if not SURVEY_ADMIN_KEY or x_admin_key!=SURVEY_ADMIN_KEY:
-        raise HTTPException(401,"Unauthorized")
 
 def survey_dict(r):
     return {"id":r.id,"submitted_at":iso(r.submitted_at),"location":r.location,"residence_type":r.residence_type,"water_source":r.water_source,"has_tank":r.has_tank,"has_pump":r.has_pump,"pump_control":r.pump_control,"problems":r.problems,"problem_frequency":r.problem_frequency,"auto_control_usefulness":r.auto_control_usefulness,"desired_features":r.desired_features,"purchase_intent":r.purchase_intent,"price_range":r.price_range,"main_concern":r.main_concern,"other_comments":r.other_comments}
@@ -290,7 +295,7 @@ def submit_survey(data:SurveyIn,request:Request):
     return {"id":row.id,"duplicate":False}
 
 @app.get("/api/v1/survey/results")
-def survey_results(_:None=Depends(require_survey_admin)):
+def survey_results(_:None=Depends(require_admin)):
     with SessionLocal() as db:
         rows=db.scalars(select(SurveyResponse)).all()
     total=len(rows)
@@ -321,7 +326,7 @@ def survey_results(_:None=Depends(require_survey_admin)):
     }
 
 @app.get("/api/v1/survey/export")
-def survey_export(_:None=Depends(require_survey_admin)):
+def survey_export(_:None=Depends(require_admin)):
     with SessionLocal() as db:
         rows=db.scalars(select(SurveyResponse).order_by(SurveyResponse.submitted_at)).all()
     buf=io.StringIO();w=csv.writer(buf)
@@ -334,6 +339,8 @@ def survey_export(_:None=Depends(require_survey_admin)):
 
 @app.websocket("/ws/live")
 async def live(ws:WebSocket):
+    if not ADMIN_KEY or ws.query_params.get("key")!=ADMIN_KEY:
+        await ws.close(code=4401);return
     await manager.connect(ws)
     try:
         while True:await ws.receive_text()
