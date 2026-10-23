@@ -18,8 +18,9 @@ def main():
     if serial is None:raise SystemExit("Install pyserial: python -m pip install pyserial")
     with serial.Serial(args.port,args.baud,timeout=2) as device:
         while True:
+            line=device.readline().decode("utf-8",errors="replace").strip()
+            if not line or not line.startswith("{"):continue  # skip human-readable debug lines
             try:
-                line=device.readline().decode("utf-8",errors="replace").strip()
-                if line:print(forward(args.api,normalize(json.loads(line))))
-            except Exception as exc:print(f"bridge error: {exc}");time.sleep(1)
+                print(forward(args.api,normalize(json.loads(line))),flush=True)
+            except Exception as exc:print(f"bridge error: {exc}",flush=True);time.sleep(1)
 if __name__=="__main__":main()
