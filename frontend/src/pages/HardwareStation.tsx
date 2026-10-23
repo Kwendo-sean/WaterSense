@@ -26,7 +26,7 @@ export default function HardwareStation({id,station,reading}:{id:number;station:
   const history=useQuery({queryKey:["telemetry",id,"hw"],queryFn:()=>api.telemetry(id,300)});
   const pump=useQuery({queryKey:["pump",id],queryFn:()=>api.pump(id)});
   // Recomputed server-side over the last hour of readings, so poll it rather than refetch on every push.
-  const insights=useQuery({queryKey:["insights",id],queryFn:()=>api.insights(id),refetchInterval:2000});
+  const insights=useQuery({queryKey:["insights",id],queryFn:()=>api.insights(id),refetchInterval:1500});
 
   const rows=(history.data||[]).filter((r:any)=>r.source==="arduino");
   const level=reading.water_level_percent??0;

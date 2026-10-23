@@ -66,7 +66,7 @@ def _apply_device_pump(db,station,reading,device,prev_device,level):
     delta_ms=0
     if run is not None and prev is not None: delta_ms=run-prev if run>=prev else run  # counter restarts when the board reboots
     liters=delta_ms/60000*PUMP_FLOW_LPM
-    open_event=db.scalar(select(PumpEvent).where(PumpEvent.station_id==station.id,PumpEvent.stopped_at.is_(None)).order_by(desc(PumpEvent.triggered_at)))
+    open_event=db.scalar(select(PumpEvent).where(PumpEvent.station_id==station.id,PumpEvent.stopped_at.is_(None)).order_by(desc(PumpEvent.triggered_at)).limit(1))
     if new_status=="on" and not open_event:
         open_event=PumpEvent(station_id=station.id,triggered_at=reading.timestamp,trigger_level=level,volume_liters=0.0);db.add(open_event)
     if open_event:
@@ -111,7 +111,7 @@ def _ingest_sync(payload: dict[str,Any]):
                 if action[0]=="start":
                     db.add(PumpEvent(station_id=station.id,triggered_at=reading.timestamp,trigger_level=action[1]))
                 elif action[0]=="stop":
-                    open_event=db.scalar(select(PumpEvent).where(PumpEvent.station_id==station.id,PumpEvent.stopped_at.is_(None)).order_by(desc(PumpEvent.triggered_at)))
+                    open_event=db.scalar(select(PumpEvent).where(PumpEvent.station_id==station.id,PumpEvent.stopped_at.is_(None)).order_by(desc(PumpEvent.triggered_at)).limit(1))
                     if open_event:
                         volume=max(0.0,(level-open_event.trigger_level)/100*station.pump_capacity_liters) if open_event.trigger_level is not None else action[3]
                         open_event.stopped_at=reading.timestamp;open_event.stop_level=action[2];open_event.volume_liters=volume
@@ -198,8 +198,8 @@ def latest(station_id:int,_:None=Depends(require_admin)):
     with SessionLocal() as db:
         station=db.get(Station,station_id)
         if not station:raise HTTPException(404,"Station not found")
-        reading=db.scalar(select(TelemetryReading).where(TelemetryReading.station_id==station_id).order_by(desc(TelemetryReading.timestamp)))
-        risk=db.scalar(select(RiskAssessment).where(RiskAssessment.station_id==station_id).order_by(desc(RiskAssessment.timestamp)))
+        reading=db.scalar(select(TelemetryReading).where(TelemetryReading.station_id==station_id).order_by(desc(TelemetryReading.timestamp)).limit(1))
+        risk=db.scalar(select(RiskAssessment).where(RiskAssessment.station_id==station_id).order_by(desc(RiskAssessment.timestamp)).limit(1))
         return {"station":station_dict(station),"reading":reading_dict(reading) if reading else None,"risk":risk_dict(risk) if risk else None}
 
 @app.get("/api/v1/stations/{station_id}/risk")
@@ -209,7 +209,7 @@ def station_risk(station_id:int,limit:int=Query(100,ge=1,le=1000),_:None=Depends
 @app.get("/api/v1/stations/{station_id}/forecast")
 def station_forecast(station_id:int,_:None=Depends(require_admin)):
     with SessionLocal() as db:
-        row=db.scalar(select(Forecast).where(Forecast.station_id==station_id).order_by(desc(Forecast.created_at)))
+        row=db.scalar(select(Forecast).where(Forecast.station_id==station_id).order_by(desc(Forecast.created_at)).limit(1))
         if not row:return {"available":False,"reason":"Insufficient declining water-level history"}
         return {"available":True,"id":row.id,"station_id":row.station_id,"forecast_for":iso(row.forecast_for),"predicted_value":row.predicted_value,"confidence":row.confidence,"metadata":row.forecast_metadata}
 
@@ -223,7 +223,7 @@ def station_pump(station_id:int,_:None=Depends(require_admin)):
         # Includes the running cycle, whose volume grows live on hardware stations.
         total_volume_liters=db.scalar(select(func.sum(PumpEvent.volume_liters)).where(PumpEvent.station_id==station_id)) or 0.0
         total_cycles=db.scalar(select(func.count()).select_from(PumpEvent).where(PumpEvent.station_id==station_id,PumpEvent.stopped_at.is_not(None))) or 0
-        current=db.scalar(select(PumpEvent).where(PumpEvent.station_id==station_id,PumpEvent.stopped_at.is_(None)).order_by(desc(PumpEvent.triggered_at)))
+        current=db.scalar(select(PumpEvent).where(PumpEvent.station_id==station_id,PumpEvent.stopped_at.is_(None)).order_by(desc(PumpEvent.triggered_at)).limit(1))
         return {"station_id":station.id,"pump_status":station.pump_status,"capacity_liters":station.pump_capacity_liters,"flow_rate_lpm":PUMP_FLOW_LPM,"current_cycle":pump_event_dict(current) if current else None,"recent_events":[pump_event_dict(e) for e in events[:10]],"prediction":prediction,"total_volume_liters":round(total_volume_liters,2),"total_cycles":total_cycles}
 
 @app.get("/api/v1/stations/{station_id}/insights")
@@ -232,11 +232,16 @@ def station_insights(station_id:int,_:None=Depends(require_admin)):
         station=db.get(Station,station_id)
         if not station:raise HTTPException(404,"Station not found")
         now=datetime.now(timezone.utc).replace(tzinfo=None)
-        rows=db.scalars(select(TelemetryReading).where(TelemetryReading.station_id==station_id,TelemetryReading.timestamp>=now-timedelta(hours=1)).order_by(desc(TelemetryReading.timestamp)).limit(4000)).all()
+        # Plain columns, not ORM objects: this is polled every couple of seconds.
+        cols=select(TelemetryReading.timestamp,TelemetryReading.water_level_percent,TelemetryReading.raw_payload).where(TelemetryReading.station_id==station_id).order_by(desc(TelemetryReading.timestamp))
+        rows=db.execute(cols.where(TelemetryReading.timestamp>=now-timedelta(hours=1)).limit(4000)).all()
         if not rows:  # station quiet for an hour: still analyse its last known reading
-            rows=db.scalars(select(TelemetryReading).where(TelemetryReading.station_id==station_id).order_by(desc(TelemetryReading.timestamp)).limit(1)).all()
+            rows=db.execute(cols.limit(1)).all()
         events=db.scalars(select(PumpEvent).where(PumpEvent.station_id==station_id,or_(PumpEvent.triggered_at>=now-timedelta(hours=24),PumpEvent.stopped_at.is_(None))).order_by(desc(PumpEvent.triggered_at))).all()
-        readings=[{"timestamp":r.timestamp,"level":r.water_level_percent,**{k:v for k,v in device_state(r).items() if k in ("pump_on","water_contact","motion")}} for r in reversed(rows)]
+        readings=[]
+        for ts,lvl,raw in reversed(rows):
+            d=(raw or {}).get("device") or {}
+            readings.append({"timestamp":ts,"level":lvl,"pump_on":d.get("pump_on"),"water_contact":d.get("water_contact"),"motion":d.get("motion")})
         out=analyze_tank(now=now,capacity_liters=station.pump_capacity_liters,flow_lpm=PUMP_FLOW_LPM,readings=readings,
             events=[{"triggered_at":e.triggered_at,"stopped_at":e.stopped_at,"volume_liters":e.volume_liters} for e in events],
             pump_on_fallback=station.pump_status=="on")
@@ -270,7 +275,7 @@ def dashboard_summary(_:None=Depends(require_admin)):
         sts=db.scalars(select(Station)).all();counts={k:sum(s.status==k for s in sts) for k in ("safe","watch","warning","critical")}
         readings=[]
         for s in sts:
-            r=db.scalar(select(TelemetryReading).where(TelemetryReading.station_id==s.id).order_by(desc(TelemetryReading.timestamp)))
+            r=db.scalar(select(TelemetryReading).where(TelemetryReading.station_id==s.id).order_by(desc(TelemetryReading.timestamp)).limit(1))
             if r:readings.append(r)
         active=db.scalar(select(func.count()).select_from(Alert).where(Alert.resolved==False)) or 0
         risk_penalty=counts["watch"]*5+counts["warning"]*12+counts["critical"]*24

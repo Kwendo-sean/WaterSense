@@ -5,3 +5,9 @@ import os
 # test file only works if that file happens to import app.main first.
 os.environ.setdefault("DATABASE_URL", "sqlite:///./test_watersense.db")
 os.environ.setdefault("SURVEY_ADMIN_KEY", "test-admin-key")
+
+
+def pytest_sessionfinish(session, exitstatus):
+    for suffix in ("", "-wal", "-shm"):
+        try: os.remove("test_watersense.db" + suffix)
+        except OSError: pass

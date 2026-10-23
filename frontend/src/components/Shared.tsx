@@ -13,12 +13,45 @@ export function AdminGate({children}:{children:React.ReactNode}){
 }
 export function Logo({dark=false}:{dark?:boolean}){return <div className={`logo ${dark?"logo-dark":""}`}><span className="drop-mark">◒</span><span>WATERSENSE <b>AI</b></span></div>}
 export function StatusPill({status}:{status:Status|string}){return <span className={`status status-${status}`}><i/>{status.toUpperCase()}</span>}
-export function LiveSocket(){const qc=useQueryClient();const [connected,setConnected]=useState(false);useEffect(()=>{let ws:WebSocket|undefined;let retry:number;let refresh:number|undefined;const invalidate=()=>{qc.invalidateQueries({queryKey:["summary"]});qc.invalidateQueries({queryKey:["stations"]});qc.invalidateQueries({queryKey:["activity"]});qc.invalidateQueries({queryKey:["alerts"]});qc.invalidateQueries({queryKey:["latest"]});qc.invalidateQueries({queryKey:["telemetry"]});qc.invalidateQueries({queryKey:["risk"]});qc.invalidateQueries({queryKey:["pumps"]});qc.invalidateQueries({queryKey:["pump"]})};const open=()=>{const key=getAdminKey();ws=new WebSocket(WS+(key?`?key=${encodeURIComponent(key)}`:""));ws.onopen=()=>setConnected(true);ws.onclose=()=>{setConnected(false);retry=window.setTimeout(open,2000)};
-    // Leading-edge throttle, not a debounce: a continuous fast stream (a real
-    // device posting every ~500ms) must not starve the UI update by endlessly
-    // pushing a trailing timer back. Fire once immediately, then at most every
-    // 150ms while messages keep arriving, instead of waiting for silence.
-    ws.onmessage=()=>{if(refresh===undefined){invalidate();refresh=window.setTimeout(()=>{refresh=undefined},150)}}};open();return()=>{clearTimeout(retry);clearTimeout(refresh);ws?.close()}},[qc]);return <span className={`connection ${connected?"online":""}`}><i/>{connected?"LIVE LINK":"RECONNECTING"}</span>}
+// Server-computed views (totals, lists, charts) refetched at most this often.
+const AGGREGATE_KEYS=["summary","stations","activity","alerts","pumps","pump","risk","forecast"];
+const AGGREGATE_EVERY_MS=1000;
+const HISTORY_CACHES:[string,number][]=[["",100],["hw",300]];
+
+export function LiveSocket(){
+  const qc=useQueryClient();const [connected,setConnected]=useState(false);
+  useEffect(()=>{
+    let ws:WebSocket|undefined,retry:number|undefined,pending:number|undefined,last=0,disposed=false;
+    const refreshAggregates=()=>{pending=undefined;last=Date.now();AGGREGATE_KEYS.forEach(k=>qc.invalidateQueries({queryKey:[k]}))};
+    // Leading + trailing throttle: an update lands immediately, a burst still ends with a final refresh.
+    const scheduleAggregates=()=>{if(pending===undefined)pending=window.setTimeout(refreshAggregates,Math.max(0,AGGREGATE_EVERY_MS-(Date.now()-last)))};
+    // The push already carries the full reading, so write it straight into the
+    // cache: the page updates instantly without a single extra request.
+    const applyReading=(d:any)=>{
+      const id=d.station.id;
+      qc.setQueryData(["latest",id],{station:d.station,reading:d.reading,risk:d.risk});
+      for(const [suffix,keep] of HISTORY_CACHES){
+        const key=suffix?["telemetry",id,suffix]:["telemetry",id];
+        qc.setQueryData(key,(old:any[]|undefined)=>old?[...old.filter(r=>r.id!==d.reading.id),d.reading].slice(-keep):old);
+      }
+    };
+    const open=()=>{
+      const key=getAdminKey();
+      ws=new WebSocket(WS+(key?`?key=${encodeURIComponent(key)}`:""));
+      ws.onopen=()=>{setConnected(true);refreshAggregates()};
+      ws.onclose=()=>{setConnected(false);if(!disposed)retry=window.setTimeout(open,2000)};
+      ws.onmessage=(e)=>{
+        let m:any;try{m=JSON.parse(e.data)}catch{return}
+        if(m.event==="telemetry:new")applyReading(m.data);
+        if(m.event==="pump:changed")qc.invalidateQueries({queryKey:["pump",m.data.station_id]});
+        scheduleAggregates();
+      };
+    };
+    open();
+    return()=>{disposed=true;clearTimeout(retry);clearTimeout(pending);ws?.close()};
+  },[qc]);
+  return <span className={`connection ${connected?"online":""}`}><i/>{connected?"LIVE LINK":"RECONNECTING"}</span>;
+}
 export function Loading({label="Synchronizing telemetry"}:{label?:string}){return <div className="loading"><span/><p>{label}</p></div>}
 export function ErrorState({message="Backend unavailable"}:{message?:string}){return <div className="error-state"><strong>SIGNAL INTERRUPTED</strong><p>{message}. WaterSense will reconnect automatically.</p></div>}
 export function Disclaimer(){return <p className="disclaimer">WaterSense AI prototype outputs are decision-support signals based on available telemetry. They do not replace certified laboratory testing or regulatory water-quality assessment.</p>}
