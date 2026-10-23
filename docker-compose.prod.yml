@@ -52,6 +52,7 @@ services:
       CORS_ORIGINS: https://${DOMAIN:?DOMAIN must be set in .env}
       SIMULATOR_ENABLED: ${SIMULATOR_ENABLED:-true}
       SIMULATOR_INTERVAL_SECONDS: ${SIMULATOR_INTERVAL_SECONDS:-3}
+      SURVEY_ADMIN_KEY: ${SURVEY_ADMIN_KEY:?SURVEY_ADMIN_KEY must be set in .env}
       PYTHONUNBUFFERED: "1"
       TZ: ${TZ:-Africa/Nairobi}
     depends_on:

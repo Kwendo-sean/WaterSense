@@ -1,14 +1,16 @@
-import os
+import os, uuid, csv, io, time
+from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Query
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Query, Request, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select, desc, func
 from sqlalchemy.exc import IntegrityError
 from .core import Base, engine, SessionLocal
-from .models import Station, TelemetryReading, RiskAssessment, Alert, Forecast, PumpEvent
-from .schemas import TelemetryIn, StationIn, StationPatch
+from .models import Station, TelemetryReading, RiskAssessment, Alert, Forecast, PumpEvent, SurveyResponse
+from .schemas import TelemetryIn, StationIn, StationPatch, SurveyIn
 from .services.risk import assess_risk
 from .services.forecast import calculate_forecast
 from .services.pump import evaluate_pump, predict_pump_schedule
@@ -239,6 +241,96 @@ def scenario(payload:dict):
     with SessionLocal() as db:
         if not db.get(Station,int(station_id)):raise HTTPException(404,"Station not found")
     simulator.set_scenario(station_id,scenario_name,payload.get("intensity",1),payload.get("overrides"));return {"accepted":True,"station_id":station_id,"scenario":scenario_name.upper()}
+
+# -------- Market research survey --------
+SURVEY_ADMIN_KEY=os.getenv("SURVEY_ADMIN_KEY","")
+SURVEY_RATE_LIMIT=5          # max submissions
+SURVEY_RATE_WINDOW=3600.0    # per hour, per IP, in-memory (single-process app)
+_survey_submit_times:dict[str,list[float]]=defaultdict(list)
+
+def require_survey_admin(x_admin_key:str|None=Header(None)):
+    if not SURVEY_ADMIN_KEY or x_admin_key!=SURVEY_ADMIN_KEY:
+        raise HTTPException(401,"Unauthorized")
+
+def survey_dict(r):
+    return {"id":r.id,"submitted_at":iso(r.submitted_at),"location":r.location,"residence_type":r.residence_type,"water_source":r.water_source,"has_tank":r.has_tank,"has_pump":r.has_pump,"pump_control":r.pump_control,"problems":r.problems,"problem_frequency":r.problem_frequency,"auto_control_usefulness":r.auto_control_usefulness,"desired_features":r.desired_features,"purchase_intent":r.purchase_intent,"price_range":r.price_range,"main_concern":r.main_concern,"other_comments":r.other_comments}
+
+def _tally(rows,field,denom=None):
+    d=denom if denom is not None else len(rows);c:dict[str,int]={}
+    for r in rows:
+        v=getattr(r,field)
+        if v is not None:c[v]=c.get(v,0)+1
+    return [{"option":k,"count":v,"pct":round(v/d*100,1) if d else 0.0} for k,v in sorted(c.items(),key=lambda kv:-kv[1])]
+
+def _tally_multi(rows,field,denom=None):
+    d=denom if denom is not None else len(rows);c:dict[str,int]={}
+    for r in rows:
+        for v in (getattr(r,field) or []):c[v]=c.get(v,0)+1
+    return [{"option":k,"count":v,"pct":round(v/d*100,1) if d else 0.0} for k,v in sorted(c.items(),key=lambda kv:-kv[1])]
+
+@app.post("/api/v1/survey/responses",status_code=201)
+def submit_survey(data:SurveyIn,request:Request):
+    client_ip=request.client.host if request.client else "unknown"
+    now_ts=time.time()
+    window=[t for t in _survey_submit_times[client_ip] if now_ts-t<SURVEY_RATE_WINDOW]
+    if len(window)>=SURVEY_RATE_LIMIT:
+        raise HTTPException(429,"Too many submissions from this location. Please try again later.")
+    with SessionLocal() as db:
+        existing=db.scalar(select(SurveyResponse).where(SurveyResponse.idempotency_key==data.idempotency_key))
+        if existing:return {"id":existing.id,"duplicate":True}
+        row=SurveyResponse(id=uuid.uuid4().hex,**data.model_dump())
+        db.add(row)
+        try:db.commit()
+        except IntegrityError:
+            db.rollback()
+            existing=db.scalar(select(SurveyResponse).where(SurveyResponse.idempotency_key==data.idempotency_key))
+            if existing:return {"id":existing.id,"duplicate":True}
+            raise HTTPException(409,"Duplicate submission")
+    window.append(now_ts);_survey_submit_times[client_ip]=window
+    return {"id":row.id,"duplicate":False}
+
+@app.get("/api/v1/survey/results")
+def survey_results(_:None=Depends(require_survey_admin)):
+    with SessionLocal() as db:
+        rows=db.scalars(select(SurveyResponse)).all()
+    total=len(rows)
+    kenya=[r for r in rows if r.location in ("Nairobi","Another part of Kenya")]
+    tank_rows=[r for r in rows if r.has_tank=="Yes"]
+    pump_rows=[r for r in rows if r.has_pump=="Yes"]
+    timestamps=[r.submitted_at for r in rows]
+    return {
+        "total_responses":total,
+        "collection_start":iso(min(timestamps)) if timestamps else None,
+        "collection_end":iso(max(timestamps)) if timestamps else None,
+        "segments":{"all":total,"kenya":len(kenya),"with_tank":len(tank_rows),"with_pump":len(pump_rows)},
+        "by_location":_tally(rows,"location"),
+        "by_residence_type":_tally(rows,"residence_type"),
+        "by_water_source":_tally(rows,"water_source"),
+        "has_tank":_tally(rows,"has_tank"),
+        "has_pump":_tally(rows,"has_pump"),
+        "pump_control":_tally(pump_rows,"pump_control",denom=len(pump_rows)),
+        "problems":_tally_multi(rows,"problems"),
+        "problem_frequency":_tally(rows,"problem_frequency"),
+        "auto_control_usefulness":_tally(rows,"auto_control_usefulness"),
+        "desired_features":_tally_multi(rows,"desired_features"),
+        "purchase_intent":_tally(rows,"purchase_intent"),
+        "price_range":_tally(rows,"price_range"),
+        "main_concern":_tally(rows,"main_concern"),
+        "comments":[r.other_comments for r in rows if r.other_comments],
+        "methodology_note":"Responses are self-reported and collected by convenience sampling (shared links), not a random or representative sample. Percentages for multi-select questions (problems, desired_features) can sum to more than 100% since respondents may pick several options. Pump-control percentages are calculated only among respondents who reported using an electric pump.",
+    }
+
+@app.get("/api/v1/survey/export")
+def survey_export(_:None=Depends(require_survey_admin)):
+    with SessionLocal() as db:
+        rows=db.scalars(select(SurveyResponse).order_by(SurveyResponse.submitted_at)).all()
+    buf=io.StringIO();w=csv.writer(buf)
+    fields=["id","submitted_at","location","residence_type","water_source","has_tank","has_pump","pump_control","problems","problem_frequency","auto_control_usefulness","desired_features","purchase_intent","price_range","main_concern","other_comments"]
+    w.writerow(fields)
+    for r in rows:
+        w.writerow([r.id,iso(r.submitted_at),r.location,r.residence_type,r.water_source,r.has_tank,r.has_pump,r.pump_control or "","|".join(r.problems or []),r.problem_frequency,r.auto_control_usefulness,"|".join(r.desired_features or []),r.purchase_intent,r.price_range,r.main_concern,(r.other_comments or "").replace("\n"," ").replace("\r","")])
+    buf.seek(0)
+    return StreamingResponse(iter([buf.getvalue()]),media_type="text/csv",headers={"Content-Disposition":"attachment; filename=watersense_survey_export.csv"})
 
 @app.websocket("/ws/live")
 async def live(ws:WebSocket):

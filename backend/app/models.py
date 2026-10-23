@@ -89,6 +89,27 @@ class Alert(Base):
     acknowledged: Mapped[bool]=mapped_column(Boolean, default=False)
     resolved: Mapped[bool]=mapped_column(Boolean, default=False)
 
+class SurveyResponse(Base):
+    __tablename__="survey_responses"
+    id: Mapped[str]=mapped_column(String, primary_key=True)
+    submitted_at: Mapped[datetime]=mapped_column(DateTime, default=now, index=True)
+    idempotency_key: Mapped[str]=mapped_column(String, unique=True, index=True)
+    location: Mapped[str]=mapped_column(String)
+    residence_type: Mapped[str]=mapped_column(String)
+    water_source: Mapped[str]=mapped_column(String)
+    has_tank: Mapped[str]=mapped_column(String)
+    has_pump: Mapped[str]=mapped_column(String)
+    pump_control: Mapped[str|None]=mapped_column(String, nullable=True)
+    problems: Mapped[list]=mapped_column(JSON, default=list)
+    problem_frequency: Mapped[str]=mapped_column(String)
+    auto_control_usefulness: Mapped[str]=mapped_column(String)
+    desired_features: Mapped[list]=mapped_column(JSON, default=list)
+    purchase_intent: Mapped[str]=mapped_column(String)
+    price_range: Mapped[str]=mapped_column(String)
+    main_concern: Mapped[str]=mapped_column(String)
+    other_comments: Mapped[str|None]=mapped_column(String, nullable=True)
+    # No name, email, phone, address, or IP is ever stored here by design.
+
 class Forecast(Base):
     __tablename__="forecasts"
     id: Mapped[int]=mapped_column(primary_key=True)
