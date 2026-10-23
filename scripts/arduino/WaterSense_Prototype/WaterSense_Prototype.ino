@@ -9,9 +9,9 @@
 const char* STATION_CODE = "WS-PROTOTYPE-01";
 
 // -------- PIN CONFIGURATION --------
-const int LEVEL_PIN = A0;       // Potentiometer: simulated tank level
+const int LEVEL_PIN = A0;        // Potentiometer: simulated tank level
 const int WATER_SENSOR_PIN = A1; // Water contact sensor
-const int PIR_PIN = 2;          // PIR motion sensor
+const int PIR_PIN = 2;           // PIR motion sensor
 
 const int MOTOR_IN1 = 4;
 const int MOTOR_IN2 = 5;
@@ -24,9 +24,16 @@ const int RED_LED = 10;
 const int BUZZER_PIN = 11;
 
 // -------- WATER LEVEL SETTINGS --------
-// Analog readings range from 0 to 1023.
+// Analog readings range from 0 to 1023. These drive the LEDs only.
 const int LOW_LEVEL_THRESHOLD = 341;
 const int MEDIUM_LEVEL_THRESHOLD = 682;
+
+// -------- AUTOMATIC PUMP CONTROL --------
+// Hysteresis: the pump starts when the tank drops to PUMP_START_PERCENT and
+// keeps running until it refills to PUMP_STOP_PERCENT, like a float switch.
+// The backend mirrors these values, so change both together.
+const int PUMP_START_PERCENT = 20;
+const int PUMP_STOP_PERCENT = 85;
 
 // -------- MOTOR SETTINGS --------
 const int STEPS_PER_REVOLUTION = 2048;
@@ -35,30 +42,37 @@ Stepper pumpMotor(
   MOTOR_IN1, MOTOR_IN3, MOTOR_IN2, MOTOR_IN4
 );
 
-const int MOTOR_SPEED_RPM = 10;
-
-// Run the motor in short bursts to simulate pumping.
-const int PUMP_STEPS = 256;
-const unsigned long PUMP_INTERVAL_MS = 2000;
+const int MOTOR_SPEED_RPM = 12;
+// Small step chunks keep the motor turning continuously while the loop still
+// reads sensors and reports every SENSOR_INTERVAL_MS.
+const int STEPS_PER_CHUNK = 16;
 
 // -------- SENSOR SETTINGS --------
-// Calibrate these after checking your water sensor's
-// readings in the Serial Monitor.
+// Calibrate after comparing dry and wet readings in the Serial Monitor.
 const int WATER_WET_THRESHOLD = 100;
 
 const unsigned long SENSOR_INTERVAL_MS = 500;
 const unsigned long PIR_WARMUP_MS = 30000;
 
+// The potentiometer's ADC value jitters a few counts, which flips the percent
+// between neighbours (74/75/74...). Average several samples and only move the
+// reported level when the raw value has really changed.
+const int LEVEL_SAMPLES = 16;
+const int LEVEL_DEADBAND_RAW = 6;
+
 // -------- GLOBAL VARIABLES --------
 int rawLevel = 0;
+int lastLevelRaw = -1000;
 int waterSensorValue = 0;
 int levelPercent = 0;
 
 bool motionDetected = false;
 bool waterDetected = false;
 
+bool pumpOn = false;
+unsigned long pumpRunMs = 0;   // total motor run time since boot
+
 unsigned long lastSensorRead = 0;
-unsigned long lastPumpRun = 0;
 unsigned long bootTime = 0;
 
 enum WaterLevel {
@@ -82,12 +96,18 @@ void setup() {
   pinMode(RED_LED, OUTPUT);
   pinMode(BUZZER_PIN, OUTPUT);
 
+  pinMode(MOTOR_IN1, OUTPUT);
+  pinMode(MOTOR_IN2, OUTPUT);
+  pinMode(MOTOR_IN3, OUTPUT);
+  pinMode(MOTOR_IN4, OUTPUT);
+
   digitalWrite(GREEN_LED, LOW);
   digitalWrite(YELLOW_LED, LOW);
   digitalWrite(RED_LED, LOW);
   digitalWrite(BUZZER_PIN, LOW);
 
   pumpMotor.setSpeed(MOTOR_SPEED_RPM);
+  releaseMotor();
 
   bootTime = millis();
 
@@ -106,27 +126,20 @@ void setup() {
 void loop() {
   unsigned long now = millis();
 
-  // Read and process sensors periodically.
   if (now - lastSensorRead >= SENSOR_INTERVAL_MS) {
     lastSensorRead = now;
     readSensors();
     updateWaterLevel();
+    updatePump();
     updateIndicators();
     printStatus();
     sendTelemetryJSON();
   }
 
-  // Run the simulated pump when the level is low.
-  // Wait for PIR warm-up before automatic pumping.
-  if (currentLevel == LEVEL_LOW &&
-      now - bootTime >= PIR_WARMUP_MS &&
-      now - lastPumpRun >= PUMP_INTERVAL_MS) {
-
-    lastPumpRun = now;
-
-    Serial.println("PUMP: Low level - running pump motor.");
-
-    pumpMotor.step(PUMP_STEPS);
+  if (pumpOn) {
+    unsigned long started = millis();
+    pumpMotor.step(STEPS_PER_CHUNK);
+    pumpRunMs += millis() - started;
   }
 }
 
@@ -134,16 +147,23 @@ void loop() {
 // READ SENSORS
 // ============================================
 void readSensors() {
-  rawLevel = analogRead(LEVEL_PIN);
+  long sum = 0;
+  for (int i = 0; i < LEVEL_SAMPLES; i++) {
+    sum += analogRead(LEVEL_PIN);
+  }
+  rawLevel = sum / LEVEL_SAMPLES;
   waterSensorValue = analogRead(WATER_SENSOR_PIN);
 
-  levelPercent = map(rawLevel, 0, 1023, 0, 100);
-  levelPercent = constrain(levelPercent, 0, 100);
+  // Always track the true ends of the range so 0% and 100% are reachable.
+  if (abs(rawLevel - lastLevelRaw) >= LEVEL_DEADBAND_RAW || rawLevel <= 2 || rawLevel >= 1021) {
+    lastLevelRaw = rawLevel;
+    levelPercent = map(rawLevel, 0, 1023, 0, 100);
+    levelPercent = constrain(levelPercent, 0, 100);
+  }
 
   motionDetected = digitalRead(PIR_PIN) == HIGH;
 
   // This is an initial threshold, not a calibrated value.
-  // Adjust after comparing dry and wet sensor readings.
   waterDetected = waterSensorValue > WATER_WET_THRESHOLD;
 }
 
@@ -163,10 +183,42 @@ void updateWaterLevel() {
 }
 
 // ============================================
+// AUTOMATIC PUMP CONTROL
+// ============================================
+void updatePump() {
+  if (!pumpOn && levelPercent <= PUMP_START_PERCENT) {
+    pumpOn = true;
+    Serial.println("PUMP: ON - tank low, refilling.");
+  }
+  else if (pumpOn && levelPercent >= PUMP_STOP_PERCENT) {
+    pumpOn = false;
+    releaseMotor();
+    Serial.println("PUMP: OFF - tank full.");
+    beep(2);
+  }
+}
+
+// De-energise the coils so the stepper doesn't heat up while idle.
+void releaseMotor() {
+  digitalWrite(MOTOR_IN1, LOW);
+  digitalWrite(MOTOR_IN2, LOW);
+  digitalWrite(MOTOR_IN3, LOW);
+  digitalWrite(MOTOR_IN4, LOW);
+}
+
+void beep(int times) {
+  for (int i = 0; i < times; i++) {
+    digitalWrite(BUZZER_PIN, HIGH);
+    delay(120);
+    digitalWrite(BUZZER_PIN, LOW);
+    delay(120);
+  }
+}
+
+// ============================================
 // LEDS AND BUZZER
 // ============================================
 void updateIndicators() {
-  // Turn all level LEDs off before selecting one.
   digitalWrite(GREEN_LED, LOW);
   digitalWrite(YELLOW_LED, LOW);
   digitalWrite(RED_LED, LOW);
@@ -207,6 +259,9 @@ void printStatus() {
     Serial.print("HIGH");
   }
 
+  Serial.print(" | Pump: ");
+  Serial.print(pumpOn ? "ON" : "OFF");
+
   Serial.print(" | Water sensor ADC: ");
   Serial.print(waterSensorValue);
 
@@ -219,14 +274,26 @@ void printStatus() {
 
 // ============================================
 // JSON LINE FOR scripts/arduino_serial_bridge.py
-// One self-contained JSON object per line. The bridge script parses each
-// serial line independently, so this must stay on its own println-terminated
-// line, separate from printStatus() above.
+// One self-contained JSON object per line. The bridge parses each line
+// independently, so this must stay on its own println-terminated line.
 // ============================================
 void sendTelemetryJSON() {
   Serial.print("{\"station_code\":\"");
   Serial.print(STATION_CODE);
   Serial.print("\",\"water_level_percent\":");
   Serial.print(levelPercent);
+  Serial.print(",\"level_raw\":");
+  Serial.print(rawLevel);
+  Serial.print(",\"pump_on\":");
+  Serial.print(pumpOn ? "true" : "false");
+  Serial.print(",\"pump_run_ms\":");
+  Serial.print(pumpRunMs);
+  Serial.print(",\"water_contact\":");
+  Serial.print(waterDetected ? "true" : "false");
+  // The PIR reads garbage while warming up, so leave motion out until then.
+  if (millis() - bootTime >= PIR_WARMUP_MS) {
+    Serial.print(",\"motion\":");
+    Serial.print(motionDetected ? "true" : "false");
+  }
   Serial.println("}");
 }

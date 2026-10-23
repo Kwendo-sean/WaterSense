@@ -19,6 +19,13 @@ class Device(BaseModel):
     source: Literal["simulator","arduino","esp32","manual","external"]="simulator"
     battery_percent: float|None=Field(None, ge=0, le=100)
     signal_strength: float|None=Field(None, ge=-150, le=0)
+    # Reported by real controllers. When pump_on is present it is the source of
+    # truth for pump state; pump_run_ms is cumulative motor run time since boot.
+    pump_on: bool|None=None
+    pump_run_ms: int|None=Field(None, ge=0)
+    level_raw: int|None=Field(None, ge=0, le=4095)
+    water_contact: bool|None=None
+    motion: bool|None=None
 class TelemetryIn(BaseModel):
     station_code: str
     timestamp: datetime|None=None

@@ -20,7 +20,22 @@ def _level(v):
     if v is None or v>=30:return 0
     return _clamp((30-v)/20*100)
 
-def assess_risk(reading, history):
+# Fitting an IsolationForest costs ~185ms; doing it on every reading starved the
+# event loop once a device posted twice a second. Keep one model per station and
+# refit it every REFIT_EVERY readings instead.
+REFIT_EVERY=25
+_models:dict={}
+
+def _anomaly_model(model_key,rows):
+    cached=_models.get(model_key) if model_key is not None else None
+    if cached is None or cached[1]>=REFIT_EVERY:
+        model=IsolationForest(contamination=.1,random_state=42).fit(rows)
+        if model_key is not None:_models[model_key]=[model,0]
+        return model
+    cached[1]+=1
+    return cached[0]
+
+def assess_risk(reading, history, model_key=None):
     ph,turb,cond,level=(_ph(reading.get("ph")),_turb(reading.get("turbidity_ntu")),_cond(reading.get("conductivity_us_cm")),_level(reading.get("water_level_percent")))
     rate=0; anomaly=0; factors=[]
     if history:
@@ -33,7 +48,7 @@ def assess_risk(reading, history):
         rows=[[float(h.get(k) or 0) for k in FEATURES] for h in history[-100:]]
         current=[float(reading.get(k) or 0) for k in FEATURES]
         try:
-            model=IsolationForest(contamination=.1,random_state=42).fit(rows)
+            model=_anomaly_model(model_key,rows)
             raw=-float(model.decision_function([current])[0])
             anomaly=_clamp(40+raw*300) if model.predict([current])[0]<0 else _clamp(raw*100)
         except ValueError: anomaly=0

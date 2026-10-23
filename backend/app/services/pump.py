@@ -1,7 +1,13 @@
+import os
 from collections import defaultdict
+from datetime import timezone
+from zoneinfo import ZoneInfo
 
 LOW_THRESHOLD=20.0
 HIGH_THRESHOLD=85.0
+# Rated flow of a typical small domestic transfer pump. Hardware stations meter
+# volume as motor run time x this rate, since the prototype has no flow meter.
+PUMP_FLOW_LPM=20.0
 DAYS=["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
 
 def evaluate_pump(pump_status,level,capacity_liters):
@@ -14,17 +20,25 @@ def evaluate_pump(pump_status,level,capacity_liters):
         return "off",("stop",level,volume)
     return pump_status,None
 
+def _local(dt):
+    """Timestamps are stored as naive UTC; schedules should read in the site's local time."""
+    try: tz=ZoneInfo(os.getenv("TZ") or "Africa/Nairobi")
+    except Exception: return dt
+    return dt.replace(tzinfo=timezone.utc).astimezone(tz)
+
 def predict_pump_schedule(events):
     """events: [{"triggered_at":datetime,"volume_liters":float|None}, ...] completed cycles only.
     Aggregates by (weekday, hour) to recommend when the next pump run is likely and how much it
     will need to move. Deterministic statistics over observed history, not a trained model."""
-    timed=[e for e in events if e.get("volume_liters") is not None]
+    # A cycle that moved no water carries no information about demand.
+    timed=[e for e in events if (e.get("volume_liters") or 0)>0]
     if not timed: return None
     buckets=defaultdict(list)
-    for e in timed: buckets[(e["triggered_at"].weekday(),e["triggered_at"].hour)].append(e["volume_liters"])
+    for e in timed:
+        t=_local(e["triggered_at"]);buckets[(t.weekday(),t.hour)].append(e["volume_liters"])
     (weekday,hour),volumes=sorted(buckets.items(),key=lambda kv:(-len(kv[1]),-sum(kv[1])))[0]
     daily=defaultdict(float)
-    for e in timed: daily[e["triggered_at"].date()]+=e["volume_liters"]
+    for e in timed: daily[_local(e["triggered_at"]).date()]+=e["volume_liters"]
     avg_daily=sum(daily.values())/len(daily)
     return {
         "predicted_weekday":DAYS[weekday],
