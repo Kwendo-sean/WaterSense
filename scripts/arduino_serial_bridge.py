@@ -20,17 +20,27 @@ def main():
     # Not "localhost": on Windows it tries IPv6 first and stalls ~2 s per request.
     p.add_argument("--api",default="http://127.0.0.1:8000/api/v1/telemetry");args=p.parse_args()
     if serial is None:raise SystemExit("Install pyserial: python -m pip install pyserial")
-    with serial.Serial(args.port,args.baud,timeout=2) as device:
+    waiting=False
+    while True:  # survive the board being unplugged or the port being grabbed by the IDE
+        try:
+            with serial.Serial(args.port,args.baud,timeout=2) as device:
+                print(f"{time.strftime('%H:%M:%S')} connected to {args.port}",flush=True);waiting=False
+                pump(device,args.api)
+        except serial.SerialException as exc:
+            if not waiting:print(f"{time.strftime('%H:%M:%S')} {args.port} unavailable ({exc}); retrying every 2 s",flush=True);waiting=True
+            time.sleep(2)
+
+def pump(device,api):
+    latest=None
+    while True:
+        line=device.readline().decode("utf-8",errors="replace").strip()
+        if line.startswith("{"):latest=line
+        # Drain anything already buffered first, so a slow POST never makes
+        # the dashboard fall behind the device; only the newest line is sent.
+        if device.in_waiting or latest is None:continue
+        try:
+            result=forward(api,normalize(json.loads(latest)))
+            print(f"{time.strftime('%H:%M:%S')} {latest} -> {result.get('station_status')}",flush=True)
+        except Exception as exc:print(f"bridge error: {exc}",flush=True);time.sleep(1)
         latest=None
-        while True:
-            line=device.readline().decode("utf-8",errors="replace").strip()
-            if line.startswith("{"):latest=line
-            # Drain anything already buffered first, so a slow POST never makes
-            # the dashboard fall behind the device; only the newest line is sent.
-            if device.in_waiting or latest is None:continue
-            try:
-                result=forward(args.api,normalize(json.loads(latest)))
-                print(f"{time.strftime('%H:%M:%S')} {latest} -> {result.get('station_status')}",flush=True)
-            except Exception as exc:print(f"bridge error: {exc}",flush=True);time.sleep(1)
-            latest=None
 if __name__=="__main__":main()
