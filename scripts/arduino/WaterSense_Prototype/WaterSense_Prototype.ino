@@ -1,4 +1,6 @@
 #include <Stepper.h>
+#include <U8g2lib.h>
+#include <Wire.h>
 
 // ============================================
 // WATERSENSE AI - ARDUINO UNO R3 DEMO
@@ -12,6 +14,7 @@ const char* STATION_CODE = "WS-PROTOTYPE-01";
 const int LEVEL_PIN = A0;        // Potentiometer: simulated tank level
 const int WATER_SENSOR_PIN = A1; // Water contact sensor
 const int PIR_PIN = 2;           // PIR motion sensor
+// OLED: SDA -> A4, SCL -> A5 (hardware I2C), address 0x3C
 
 const int MOTOR_IN1 = 4;
 const int MOTOR_IN2 = 5;
@@ -21,7 +24,18 @@ const int MOTOR_IN4 = 7;
 const int GREEN_LED = 8;
 const int YELLOW_LED = 9;
 const int RED_LED = 10;
-const int BUZZER_PIN = 11;
+
+// -------- OLED DISPLAY --------
+// 128x64 SSD1306 in page-buffer mode (128 bytes of RAM instead of 1 KB, which
+// the Uno can't spare). If the image looks shifted with a stripe of noise down
+// one edge, the module is an SH1106: swap SSD1306 for SH1106 in this line.
+U8G2_SSD1306_128X64_NONAME_1_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE);
+
+// -------- TANK --------
+// Shown on the OLED only. Keep in sync with the station's capacity and the
+// backend's rated pump flow (PUMP_FLOW_LPM) so both screens agree.
+const long TANK_CAPACITY_L = 5000;
+const float PUMP_FLOW_LPM = 20.0;
 
 // -------- WATER LEVEL SETTINGS --------
 // Analog readings range from 0 to 1023. These drive the LEDs only.
@@ -53,6 +67,7 @@ const int WATER_WET_THRESHOLD = 100;
 
 const unsigned long SENSOR_INTERVAL_MS = 500;
 const unsigned long PIR_WARMUP_MS = 30000;
+const unsigned long FULL_BANNER_MS = 4000;
 
 // The potentiometer's ADC value jitters a few counts, which flips the percent
 // between neighbours (74/75/74...). Average several samples and only move the
@@ -71,9 +86,11 @@ bool waterDetected = false;
 
 bool pumpOn = false;
 unsigned long pumpRunMs = 0;   // total motor run time since boot
+unsigned long fullBannerUntil = 0;
 
 unsigned long lastSensorRead = 0;
 unsigned long bootTime = 0;
+byte frame = 0;                // animation tick, advances every redraw
 
 enum WaterLevel {
   LEVEL_LOW,
@@ -94,7 +111,6 @@ void setup() {
   pinMode(GREEN_LED, OUTPUT);
   pinMode(YELLOW_LED, OUTPUT);
   pinMode(RED_LED, OUTPUT);
-  pinMode(BUZZER_PIN, OUTPUT);
 
   pinMode(MOTOR_IN1, OUTPUT);
   pinMode(MOTOR_IN2, OUTPUT);
@@ -104,20 +120,25 @@ void setup() {
   digitalWrite(GREEN_LED, LOW);
   digitalWrite(YELLOW_LED, LOW);
   digitalWrite(RED_LED, LOW);
-  digitalWrite(BUZZER_PIN, LOW);
 
   pumpMotor.setSpeed(MOTOR_SPEED_RPM);
   releaseMotor();
 
+  oled.begin();
+  oled.setBusClock(400000);  // fast I2C so redraws barely pause the motor
+  drawSplash();
+
   bootTime = millis();
 
   Serial.println();
-  Serial.println("================================");
-  Serial.println("       WATERSENSE AI DEMO");
-  Serial.println("================================");
-  Serial.println("Starting sensors and pump...");
-  Serial.println("PIR sensor warming up for 30 seconds.");
+  Serial.println(F("================================"));
+  Serial.println(F("       WATERSENSE AI DEMO"));
+  Serial.println(F("================================"));
+  Serial.println(F("Starting sensors and pump..."));
+  Serial.println(F("PIR sensor warming up for 30 seconds."));
   Serial.println();
+
+  delay(1500);  // let the splash screen be seen
 }
 
 // ============================================
@@ -134,6 +155,7 @@ void loop() {
     updateIndicators();
     printStatus();
     sendTelemetryJSON();
+    drawScreen();
   }
 
   if (pumpOn) {
@@ -188,13 +210,13 @@ void updateWaterLevel() {
 void updatePump() {
   if (!pumpOn && levelPercent <= PUMP_START_PERCENT) {
     pumpOn = true;
-    Serial.println("PUMP: ON - tank low, refilling.");
+    Serial.println(F("PUMP: ON - tank low, refilling."));
   }
   else if (pumpOn && levelPercent >= PUMP_STOP_PERCENT) {
     pumpOn = false;
     releaseMotor();
-    Serial.println("PUMP: OFF - tank full.");
-    beep(2);
+    fullBannerUntil = millis() + FULL_BANNER_MS;
+    Serial.println(F("PUMP: OFF - tank full."));
   }
 }
 
@@ -206,69 +228,170 @@ void releaseMotor() {
   digitalWrite(MOTOR_IN4, LOW);
 }
 
-void beep(int times) {
-  for (int i = 0; i < times; i++) {
-    digitalWrite(BUZZER_PIN, HIGH);
-    delay(120);
-    digitalWrite(BUZZER_PIN, LOW);
-    delay(120);
-  }
+// ============================================
+// LEDS
+// ============================================
+void updateIndicators() {
+  digitalWrite(GREEN_LED, currentLevel == LEVEL_HIGH ? HIGH : LOW);
+  digitalWrite(YELLOW_LED, currentLevel == LEVEL_MEDIUM ? HIGH : LOW);
+  digitalWrite(RED_LED, currentLevel == LEVEL_LOW ? HIGH : LOW);
 }
 
 // ============================================
-// LEDS AND BUZZER
+// OLED SCREENS
 // ============================================
-void updateIndicators() {
-  digitalWrite(GREEN_LED, LOW);
-  digitalWrite(YELLOW_LED, LOW);
-  digitalWrite(RED_LED, LOW);
+void drawWaterDrop(int cx, int top, int r) {
+  // Teardrop: a circle with a triangle point on top.
+  oled.drawDisc(cx, top + r * 2, r);
+  oled.drawTriangle(cx - r + 1, top + r * 2 - 1, cx + r - 1, top + r * 2 - 1, cx, top);
+}
 
-  if (currentLevel == LEVEL_LOW) {
-    digitalWrite(RED_LED, HIGH);
-    digitalWrite(BUZZER_PIN, HIGH);
+void drawSplash() {
+  oled.firstPage();
+  do {
+    drawWaterDrop(64, 4, 7);
+    oled.setFont(u8g2_font_helvB10_tr);
+    oled.drawStr(64 - oled.getStrWidth("WATERSENSE AI") / 2, 44, "WATERSENSE AI");
+    oled.setFont(u8g2_font_5x8_tr);
+    oled.drawStr(64 - oled.getStrWidth("Smart pump controller") / 2, 58, "Smart pump controller");
+  } while (oled.nextPage());
+}
+
+// Tank graphic: outline, water fill with a surface wave, start/stop marks,
+// and a falling drop while the pump is filling it.
+void drawTank(int x, int y, int w, int h) {
+  oled.drawRFrame(x, y, w, h, 3);
+  int inner = h - 4;
+  int fill = (long)inner * levelPercent / 100;
+  int surface = y + 2 + inner - fill;
+  if (fill > 0) {
+    oled.drawBox(x + 2, surface, w - 4, fill);
+    if (fill > 2) {
+      // Ripple the surface so the tank looks alive.
+      for (int i = 0; i < w - 4; i += 4) {
+        int dip = ((i / 4 + frame) % 2 == 0) ? 1 : 0;
+        oled.setDrawColor(0);
+        oled.drawPixel(x + 2 + i + 1, surface + dip);
+        oled.drawPixel(x + 2 + i + 2, surface + dip);
+        oled.setDrawColor(1);
+      }
+    }
   }
-  else if (currentLevel == LEVEL_MEDIUM) {
-    digitalWrite(YELLOW_LED, HIGH);
-    digitalWrite(BUZZER_PIN, LOW);
+  // Start / stop marks on the right edge of the tank.
+  int startY = y + 2 + inner - (long)inner * PUMP_START_PERCENT / 100;
+  int stopY = y + 2 + inner - (long)inner * PUMP_STOP_PERCENT / 100;
+  oled.drawHLine(x + w, startY, 3);
+  oled.drawHLine(x + w, stopY, 3);
+
+  if (pumpOn) {
+    // Inflow: a drop that falls from the inlet toward the water surface.
+    int span = max(1, surface - (y + 4));
+    int dropY = y + 3 + (frame * 5) % span;
+    oled.setDrawColor(2);  // XOR so it shows over water or air
+    oled.drawBox(x + w / 2 - 1, dropY, 2, 3);
+    oled.setDrawColor(1);
   }
-  else {
-    digitalWrite(GREEN_LED, HIGH);
-    digitalWrite(BUZZER_PIN, LOW);
-  }
+}
+
+void drawScreen() {
+  frame++;
+  bool blink = frame % 2 == 0;
+  bool showFull = millis() < fullBannerUntil;
+  long liters = (long)levelPercent * TANK_CAPACITY_L / 100;
+  float pumpedL = pumpRunMs / 60000.0 * PUMP_FLOW_LPM;
+  char buf[24];
+
+  oled.firstPage();
+  do {
+    // Header: brand on the left, pump state pill on the right.
+    oled.setFont(u8g2_font_5x8_tr);
+    oled.drawStr(0, 7, "WATERSENSE");
+    if (pumpOn) {
+      oled.drawRBox(80, 0, 48, 10, 2);
+      oled.setDrawColor(0);
+      oled.drawStr(85, 8, "PUMP ON");
+      oled.drawDisc(122, 4, blink ? 2 : 1);
+      oled.setDrawColor(1);
+    } else {
+      oled.drawRFrame(80, 0, 48, 10, 2);
+      oled.drawStr(85, 8, "PUMP OFF");
+    }
+    oled.drawHLine(0, 12, 128);
+
+    drawTank(2, 15, 26, 48);
+
+    // Big level reading.
+    oled.setFont(u8g2_font_logisoso24_tn);
+    itoa(levelPercent, buf, 10);
+    int numW = oled.getStrWidth(buf);
+    int numX = 40;
+    oled.drawStr(numX, 42, buf);
+    oled.setFont(u8g2_font_helvB10_tr);
+    oled.drawStr(numX + numW + 2, 42, "%");
+
+    // Liters in the tank.
+    oled.setFont(u8g2_font_6x10_tf);
+    snprintf(buf, sizeof(buf), "%ld L in tank", liters);
+    oled.drawStr(40, 53, buf);
+
+    // Status line: the most important thing right now.
+    if (waterDetected) {
+      if (blink) {
+        oled.drawBox(38, 55, 90, 9);
+        oled.setDrawColor(0);
+      }
+      oled.drawStr(41, 63, "! LEAK AT BASE");
+      oled.setDrawColor(1);
+    } else if (showFull) {
+      oled.drawBox(38, 55, 90, 9);
+      oled.setDrawColor(0);
+      oled.drawStr(48, 63, "TANK FULL");
+      oled.setDrawColor(1);
+    } else if (pumpOn) {
+      dtostrf(pumpedL, 0, 1, buf);
+      strcat(buf, " L pumped");
+      oled.drawStr(40, 63, buf);
+    } else if (levelPercent >= PUMP_STOP_PERCENT) {
+      oled.drawStr(40, 63, "Full - standby");
+    } else {
+      snprintf(buf, sizeof(buf), "Auto at %d%%", PUMP_START_PERCENT);
+      oled.drawStr(40, 63, buf);
+    }
+  } while (oled.nextPage());
 }
 
 // ============================================
 // SERIAL MONITOR STATUS
 // ============================================
 void printStatus() {
-  Serial.print("Level ADC: ");
+  Serial.print(F("Level ADC: "));
   Serial.print(rawLevel);
 
-  Serial.print(" | Level: ");
+  Serial.print(F(" | Level: "));
   Serial.print(levelPercent);
-  Serial.print("%");
+  Serial.print(F("%"));
 
-  Serial.print(" | Status: ");
+  Serial.print(F(" | Status: "));
   if (currentLevel == LEVEL_LOW) {
-    Serial.print("LOW");
+    Serial.print(F("LOW"));
   }
   else if (currentLevel == LEVEL_MEDIUM) {
-    Serial.print("MEDIUM");
+    Serial.print(F("MEDIUM"));
   }
   else {
-    Serial.print("HIGH");
+    Serial.print(F("HIGH"));
   }
 
-  Serial.print(" | Pump: ");
+  Serial.print(F(" | Pump: "));
   Serial.print(pumpOn ? "ON" : "OFF");
 
-  Serial.print(" | Water sensor ADC: ");
+  Serial.print(F(" | Water sensor ADC: "));
   Serial.print(waterSensorValue);
 
-  Serial.print(" | Water contact: ");
+  Serial.print(F(" | Water contact: "));
   Serial.print(waterDetected ? "DETECTED" : "NOT DETECTED");
 
-  Serial.print(" | Motion: ");
+  Serial.print(F(" | Motion: "));
   Serial.println(motionDetected ? "DETECTED" : "NONE");
 }
 
@@ -278,22 +401,22 @@ void printStatus() {
 // independently, so this must stay on its own println-terminated line.
 // ============================================
 void sendTelemetryJSON() {
-  Serial.print("{\"station_code\":\"");
+  Serial.print(F("{\"station_code\":\""));
   Serial.print(STATION_CODE);
-  Serial.print("\",\"water_level_percent\":");
+  Serial.print(F("\",\"water_level_percent\":"));
   Serial.print(levelPercent);
-  Serial.print(",\"level_raw\":");
+  Serial.print(F(",\"level_raw\":"));
   Serial.print(rawLevel);
-  Serial.print(",\"pump_on\":");
+  Serial.print(F(",\"pump_on\":"));
   Serial.print(pumpOn ? "true" : "false");
-  Serial.print(",\"pump_run_ms\":");
+  Serial.print(F(",\"pump_run_ms\":"));
   Serial.print(pumpRunMs);
-  Serial.print(",\"water_contact\":");
+  Serial.print(F(",\"water_contact\":"));
   Serial.print(waterDetected ? "true" : "false");
   // The PIR reads garbage while warming up, so leave motion out until then.
   if (millis() - bootTime >= PIR_WARMUP_MS) {
-    Serial.print(",\"motion\":");
+    Serial.print(F(",\"motion\":"));
     Serial.print(motionDetected ? "true" : "false");
   }
-  Serial.println("}");
+  Serial.println(F("}"));
 }
