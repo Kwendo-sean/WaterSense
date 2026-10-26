@@ -3,12 +3,16 @@
 
 Expected serial line (non-JSON debug lines are ignored):
   {"station_code":"WS-PROTOTYPE-01","water_level_percent":64,"pump_on":true,"pump_run_ms":1234}
+
+Each telemetry reply carries "pump_command" (A auto, 1 on, 0 off, S scheduled),
+which is written back to the board as one line. Resending it on every reading
+also feeds the firmware's watchdog, which drops to auto if the bridge stops.
 """
 import argparse,json,time,urllib.request
 try: import serial
 except ImportError: serial=None
 METRICS={"ph","turbidity_ntu","temperature_c","conductivity_us_cm","tds_ppm","water_level_percent","flow_rate_l_min"}
-DEVICE_FIELDS={"battery_percent","pump_on","pump_run_ms","level_raw","water_contact","motion"}
+DEVICE_FIELDS={"battery_percent","pump_on","pump_run_ms","level_raw","water_contact","motion","pump_mode","flow_lpm"}
 def normalize(raw):
     return {"station_code":raw["station_code"],"metrics":{k:v for k,v in raw.items() if k in METRICS},
             "device":{"source":"arduino",**{k:v for k,v in raw.items() if k in DEVICE_FIELDS}}}
@@ -40,7 +44,9 @@ def pump(device,api):
         if device.in_waiting or latest is None:continue
         try:
             result=forward(api,normalize(json.loads(latest)))
-            print(f"{time.strftime('%H:%M:%S')} {latest} -> {result.get('station_status')}",flush=True)
+            command=result.get("pump_command")
+            if command in ("A","1","0","S"):device.write(command.encode()+b"\n")
+            print(f"{time.strftime('%H:%M:%S')} {latest} -> {result.get('station_status')} cmd={command}",flush=True)
         except Exception as exc:print(f"bridge error: {exc}",flush=True);time.sleep(1)
         latest=None
 if __name__=="__main__":main()

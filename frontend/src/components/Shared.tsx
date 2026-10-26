@@ -44,6 +44,7 @@ export function LiveSocket(){
         let m:any;try{m=JSON.parse(e.data)}catch{return}
         if(m.event==="telemetry:new")applyReading(m.data);
         if(m.event==="pump:changed")qc.invalidateQueries({queryKey:["pump",m.data.station_id]});
+        if(m.event==="pump:control")qc.invalidateQueries({queryKey:["pumpControl",m.data.station_id]});
         scheduleAggregates();
       };
     };

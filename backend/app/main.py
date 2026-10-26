@@ -6,15 +6,16 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Query, Request, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select, desc, func, or_
+from sqlalchemy import select, desc, func, or_, cast, Integer
 from sqlalchemy.exc import IntegrityError
 from .core import Base, engine, SessionLocal
-from .models import Station, TelemetryReading, RiskAssessment, Alert, Forecast, PumpEvent, SurveyResponse
-from .schemas import TelemetryIn, StationIn, StationPatch, SurveyIn
+from .models import Station, TelemetryReading, RiskAssessment, Alert, Forecast, PumpEvent, SurveyResponse, PumpControl, PumpSchedule
+from .schemas import TelemetryIn, StationIn, StationPatch, SurveyIn, PumpControlIn, PumpScheduleIn
 from .services.risk import assess_risk
 from .services.forecast import calculate_forecast
-from .services.pump import evaluate_pump, predict_pump_schedule, PUMP_FLOW_LPM
+from .services.pump import evaluate_pump, predict_pump_schedule, daily_pump_stats, PUMP_FLOW_LPM
 from .services.tank_insights import analyze_tank
+from .services import pump_control
 from .seed import seed_database
 from .simulator import simulator
 
@@ -30,7 +31,7 @@ def station_dict(s):
 def pump_event_dict(e):
     return {"id":e.id,"station_id":e.station_id,"triggered_at":iso(e.triggered_at),"trigger_level":e.trigger_level,"stopped_at":iso(e.stopped_at),"stop_level":e.stop_level,"volume_liters":e.volume_liters}
 
-DEVICE_STATE_KEYS=("pump_on","pump_run_ms","level_raw","water_contact","motion")
+DEVICE_STATE_KEYS=("pump_on","pump_run_ms","level_raw","water_contact","motion","pump_mode","flow_lpm")
 
 def device_state(r):
     d=(r.raw_payload or {}).get("device") or {}
@@ -65,7 +66,7 @@ def _apply_device_pump(db,station,reading,device,prev_device,level):
     run,prev=device.pump_run_ms,prev_device.get("pump_run_ms")
     delta_ms=0
     if run is not None and prev is not None: delta_ms=run-prev if run>=prev else run  # counter restarts when the board reboots
-    liters=delta_ms/60000*PUMP_FLOW_LPM
+    liters=delta_ms/60000*(device.flow_lpm or PUMP_FLOW_LPM)
     open_event=db.scalar(select(PumpEvent).where(PumpEvent.station_id==station.id,PumpEvent.stopped_at.is_(None)).order_by(desc(PumpEvent.triggered_at)).limit(1))
     if new_status=="on" and not open_event:
         open_event=PumpEvent(station_id=station.id,triggered_at=reading.timestamp,trigger_level=level,volume_liters=0.0);db.add(open_event)
@@ -75,6 +76,14 @@ def _apply_device_pump(db,station,reading,device,prev_device,level):
     changed=station.pump_status!=new_status
     station.pump_status=new_status
     return changed
+
+def _resolve_pump_command(db,station,level):
+    control=db.get(PumpControl,station.id)
+    schedules=db.scalars(select(PumpSchedule).where(PumpSchedule.station_id==station.id,PumpSchedule.enabled==True).order_by(PumpSchedule.id)).all()
+    if control is None and not schedules: return "A",False
+    now_local=pump_control.local_now(datetime.now(timezone.utc).replace(tzinfo=None))
+    command,_,changed=pump_control.resolve(control,schedules,level,now_local)
+    return command,changed
 
 def _ingest_sync(payload: dict[str,Any]):
     data=TelemetryIn.model_validate(payload);db=SessionLocal();broadcasts=[]
@@ -117,6 +126,7 @@ def _ingest_sync(payload: dict[str,Any]):
                         open_event.stopped_at=reading.timestamp;open_event.stop_level=action[2];open_event.volume_liters=volume
                 station.pump_status=new_pump_status
                 pump_changed={"station_id":station.id,"station_code":station.station_code,"pump_status":new_pump_status,"water_level_percent":level,"timestamp":iso(reading.timestamp)}
+        pump_command,control_changed=_resolve_pump_command(db,station,level)
         db.commit()
         rd=reading_dict(reading);ra=risk_dict(assessment);sd=station_dict(station)
     finally: db.close()
@@ -125,7 +135,8 @@ def _ingest_sync(payload: dict[str,Any]):
     if previous!=result["risk_level"]: broadcasts.append(("station:status_changed",{"station_id":station.id,"station_code":station.station_code,"previous":previous,"current":result["risk_level"],"risk_score":result["overall_risk_score"],"timestamp":iso(reading.timestamp)}))
     if pump_changed: broadcasts.append(("pump:changed",pump_changed))
     if alert: broadcasts.append(("alert:new",alert_dict(alert)))
-    return {"accepted":True,"reading_id":reading.id,"station_status":result["risk_level"],"risk_score":result["overall_risk_score"],"assessment_id":assessment.id},broadcasts
+    if control_changed: broadcasts.append(("pump:control",{"station_id":station.id}))
+    return {"accepted":True,"reading_id":reading.id,"station_status":result["risk_level"],"risk_score":result["overall_risk_score"],"assessment_id":assessment.id,"pump_command":pump_command},broadcasts
 
 async def ingest_payload(payload: dict[str,Any]):
     # DB work and the risk model are synchronous; run them off the event loop so
@@ -218,13 +229,111 @@ def station_pump(station_id:int,_:None=Depends(require_admin)):
     with SessionLocal() as db:
         station=db.get(Station,station_id)
         if not station:raise HTTPException(404,"Station not found")
+        now=datetime.now(timezone.utc).replace(tzinfo=None)
         events=db.scalars(select(PumpEvent).where(PumpEvent.station_id==station_id,PumpEvent.stopped_at.is_not(None)).order_by(desc(PumpEvent.triggered_at)).limit(60)).all()
-        prediction=predict_pump_schedule([{"triggered_at":e.triggered_at,"volume_liters":e.volume_liters} for e in events])
+        prediction=predict_pump_schedule([{"triggered_at":e.triggered_at,"volume_liters":e.volume_liters} for e in events],now)
         # Includes the running cycle, whose volume grows live on hardware stations.
         total_volume_liters=db.scalar(select(func.sum(PumpEvent.volume_liters)).where(PumpEvent.station_id==station_id)) or 0.0
         total_cycles=db.scalar(select(func.count()).select_from(PumpEvent).where(PumpEvent.station_id==station_id,PumpEvent.stopped_at.is_not(None))) or 0
         current=db.scalar(select(PumpEvent).where(PumpEvent.station_id==station_id,PumpEvent.stopped_at.is_(None)).order_by(desc(PumpEvent.triggered_at)).limit(1))
-        return {"station_id":station.id,"pump_status":station.pump_status,"capacity_liters":station.pump_capacity_liters,"flow_rate_lpm":PUMP_FLOW_LPM,"current_cycle":pump_event_dict(current) if current else None,"recent_events":[pump_event_dict(e) for e in events[:10]],"prediction":prediction,"total_volume_liters":round(total_volume_liters,2),"total_cycles":total_cycles}
+        week=db.execute(select(PumpEvent.triggered_at,PumpEvent.volume_liters).where(PumpEvent.station_id==station_id,PumpEvent.triggered_at>=now-timedelta(days=8))).all()
+        daily=daily_pump_stats([{"triggered_at":t,"volume_liters":v} for t,v in week],now)
+        return {"station_id":station.id,"pump_status":station.pump_status,"capacity_liters":station.pump_capacity_liters,"flow_rate_lpm":_device_flow(db,station_id),"current_cycle":pump_event_dict(current) if current else None,"recent_events":[pump_event_dict(e) for e in events[:10]],"prediction":prediction,"total_volume_liters":round(total_volume_liters,2),"total_cycles":total_cycles,
+                "today":daily[-1],"daily":daily}
+
+SERIES_POINTS=240
+
+def _epoch_bucket(size):
+    """SQL expression for floor(epoch(timestamp) / size), per dialect."""
+    if engine.dialect.name=="sqlite":
+        return cast(func.strftime("%s",TelemetryReading.timestamp),Integer)//size
+    return func.floor(func.extract("epoch",TelemetryReading.timestamp)/size)
+
+@app.get("/api/v1/stations/{station_id}/series")
+def station_series(station_id:int,minutes:int=Query(60,ge=5,le=10080),_:None=Depends(require_admin)):
+    """Level history over any range, averaged into ~SERIES_POINTS buckets in SQL so
+    a week of 2 Hz readings stays cheap, with the share of each bucket the pump ran."""
+    with SessionLocal() as db:
+        _station_or_404(db,station_id)
+        now=datetime.now(timezone.utc).replace(tzinfo=None);start=now-timedelta(minutes=minutes)
+        size=max(1,minutes*60//SERIES_POINTS)
+        bucket=_epoch_bucket(size).label("b")
+        rows=db.execute(select(bucket,func.avg(TelemetryReading.water_level_percent),func.min(TelemetryReading.water_level_percent),func.max(TelemetryReading.water_level_percent))
+            .where(TelemetryReading.station_id==station_id,TelemetryReading.timestamp>=start,TelemetryReading.water_level_percent.is_not(None))
+            .group_by(bucket).order_by(bucket)).all()
+        runs=db.execute(select(PumpEvent.triggered_at,PumpEvent.stopped_at).where(PumpEvent.station_id==station_id,
+            PumpEvent.triggered_at<=now,or_(PumpEvent.stopped_at.is_(None),PumpEvent.stopped_at>=start))).all()
+    epoch=datetime(1970,1,1)
+    runs=[((a-epoch).total_seconds(),((b or now)-epoch).total_seconds()) for a,b in runs]
+    points=[]
+    for b,avg,lo,hi in rows:
+        t0=int(b)*size;t1=t0+size
+        ran=sum(max(0.0,min(t1,e)-max(t0,s)) for s,e in runs)
+        points.append({"t":iso(epoch+timedelta(seconds=t0)),"level":round(avg,1),"min":round(lo,1),"max":round(hi,1),"pump":round(min(1.0,ran/size),2)})
+    return {"station_id":station_id,"minutes":minutes,"bucket_seconds":size,"points":points}
+
+def _device_flow(db,station_id):
+    raw=db.scalar(select(TelemetryReading.raw_payload).where(TelemetryReading.station_id==station_id).order_by(desc(TelemetryReading.timestamp)).limit(1))
+    return ((raw or {}).get("device") or {}).get("flow_lpm") or PUMP_FLOW_LPM
+
+def _control_state(db,station):
+    now_local=pump_control.local_now(datetime.now(timezone.utc).replace(tzinfo=None))
+    control=db.get(PumpControl,station.id)
+    schedules=[s for s in db.scalars(select(PumpSchedule).where(PumpSchedule.station_id==station.id,PumpSchedule.enabled==True).order_by(PumpSchedule.id)).all()]
+    # Read-only view: resolve() may expire schedules, which only ingest persists (rolled back below).
+    command,active,_=pump_control.resolve(control,schedules,None,now_local)
+    raw=db.scalar(select(TelemetryReading.raw_payload).where(TelemetryReading.station_id==station.id).order_by(desc(TelemetryReading.timestamp)).limit(1))
+    def sched(s):
+        nxt=pump_control.next_run(s,now_local)
+        return {"id":s.id,"start_time":s.start_time,"duration_minutes":s.duration_minutes,"repeat":s.repeat,
+                "running":bool(active and active[0].id==s.id),"next_run":nxt.isoformat() if nxt else None}
+    state={"station_id":station.id,"mode":control.mode if control else "auto","command":command,
+           "device_mode":((raw or {}).get("device") or {}).get("pump_mode"),
+           "active_schedule":{"id":active[0].id,"ends_at":active[1][1].isoformat()} if active else None,
+           "schedules":[sched(s) for s in schedules if s.enabled],"local_time":now_local.isoformat()}
+    db.rollback()
+    return state
+
+def _station_or_404(db,station_id):
+    station=db.get(Station,station_id)
+    if not station:raise HTTPException(404,"Station not found")
+    return station
+
+@app.get("/api/v1/stations/{station_id}/pump/control")
+def get_pump_control(station_id:int,_:None=Depends(require_admin)):
+    with SessionLocal() as db:return _control_state(db,_station_or_404(db,station_id))
+
+@app.put("/api/v1/stations/{station_id}/pump/control")
+async def set_pump_control(station_id:int,data:PumpControlIn,_:None=Depends(require_admin)):
+    with SessionLocal() as db:
+        station=_station_or_404(db,station_id)
+        control=db.get(PumpControl,station_id) or PumpControl(station_id=station_id)
+        control.mode=data.mode;db.add(control);db.commit()
+        state=_control_state(db,station)
+    await manager.broadcast("pump:control",{"station_id":station_id})
+    return state
+
+@app.post("/api/v1/stations/{station_id}/pump/schedules",status_code=201)
+async def add_pump_schedule(station_id:int,data:PumpScheduleIn,_:None=Depends(require_admin)):
+    with SessionLocal() as db:
+        station=_station_or_404(db,station_id)
+        now_local=pump_control.local_now(datetime.now(timezone.utc).replace(tzinfo=None))
+        run_date=pump_control.first_run_date(data.start_time,data.duration_minutes,now_local) if data.repeat=="once" else None
+        db.add(PumpSchedule(station_id=station_id,run_date=run_date,**data.model_dump()));db.commit()
+        state=_control_state(db,station)
+    await manager.broadcast("pump:control",{"station_id":station_id})
+    return state
+
+@app.delete("/api/v1/stations/{station_id}/pump/schedules/{schedule_id}")
+async def delete_pump_schedule(station_id:int,schedule_id:int,_:None=Depends(require_admin)):
+    with SessionLocal() as db:
+        station=_station_or_404(db,station_id)
+        item=db.get(PumpSchedule,schedule_id)
+        if not item or item.station_id!=station_id:raise HTTPException(404,"Schedule not found")
+        db.delete(item);db.commit()
+        state=_control_state(db,station)
+    await manager.broadcast("pump:control",{"station_id":station_id})
+    return state
 
 @app.get("/api/v1/stations/{station_id}/insights")
 def station_insights(station_id:int,_:None=Depends(require_admin)):
@@ -242,7 +351,7 @@ def station_insights(station_id:int,_:None=Depends(require_admin)):
         for ts,lvl,raw in reversed(rows):
             d=(raw or {}).get("device") or {}
             readings.append({"timestamp":ts,"level":lvl,"pump_on":d.get("pump_on"),"water_contact":d.get("water_contact"),"motion":d.get("motion")})
-        out=analyze_tank(now=now,capacity_liters=station.pump_capacity_liters,flow_lpm=PUMP_FLOW_LPM,readings=readings,
+        out=analyze_tank(now=now,capacity_liters=station.pump_capacity_liters,flow_lpm=_device_flow(db,station_id),readings=readings,
             events=[{"triggered_at":e.triggered_at,"stopped_at":e.stopped_at,"volume_liters":e.volume_liters} for e in events],
             pump_on_fallback=station.pump_status=="on")
         return {**out,"station_id":station.id,"generated_at":iso(out["generated_at"])}
@@ -289,7 +398,7 @@ def dashboard_pumps(_:None=Depends(require_admin)):
         out=[]
         for s in stations:
             events=db.scalars(select(PumpEvent).where(PumpEvent.station_id==s.id,PumpEvent.stopped_at.is_not(None)).order_by(desc(PumpEvent.triggered_at)).limit(60)).all()
-            prediction=predict_pump_schedule([{"triggered_at":e.triggered_at,"volume_liters":e.volume_liters} for e in events])
+            prediction=predict_pump_schedule([{"triggered_at":e.triggered_at,"volume_liters":e.volume_liters} for e in events],datetime.now(timezone.utc).replace(tzinfo=None))
             out.append({"station_id":s.id,"station_code":s.station_code,"name":s.name,"pump_status":s.pump_status,"capacity_liters":s.pump_capacity_liters,"prediction":prediction})
         return out
 

@@ -32,10 +32,23 @@ const int RED_LED = 10;
 U8G2_SSD1306_128X64_NONAME_1_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE);
 
 // -------- TANK --------
-// Shown on the OLED only. Keep in sync with the station's capacity and the
-// backend's rated pump flow (PUMP_FLOW_LPM) so both screens agree.
+// Keep in sync with the station's capacity on the backend.
 const long TANK_CAPACITY_L = 5000;
-const float PUMP_FLOW_LPM = 20.0;
+
+// -------- SIMULATED INFLOW --------
+// There is no real water, so while the motor runs the tank level climbs by
+// FILL_STEP_PERCENT every FILL_STEP_MS, on top of the potentiometer (turning
+// the knob still sets the level directly). The flow rate this implies is sent
+// to the backend so the liters it meters match the level rise exactly.
+const int FILL_STEP_PERCENT = 1;
+const unsigned long FILL_STEP_MS = 3000;
+const float PUMP_FLOW_LPM = TANK_CAPACITY_L * FILL_STEP_PERCENT / 100.0 * 60000.0 / FILL_STEP_MS;
+
+// -------- REMOTE CONTROL --------
+// The bridge writes one command per reading: A auto, 1 manual on, 0 manual
+// off, S on by schedule. If commands stop (bridge closed, USB pulled) the
+// controller falls back to automatic after COMMAND_TIMEOUT_MS.
+const unsigned long COMMAND_TIMEOUT_MS = 10000;
 
 // -------- WATER LEVEL SETTINGS --------
 // Analog readings range from 0 to 1023. These drive the LEDs only.
@@ -86,7 +99,14 @@ bool waterDetected = false;
 
 bool pumpOn = false;
 unsigned long pumpRunMs = 0;   // total motor run time since boot
+unsigned long fillAccumMs = 0; // run time not yet turned into a level step
+unsigned long lastFillAt = 0;  // for the "+1" flash on the screen
 unsigned long fullBannerUntil = 0;
+
+char pumpMode = 'A';           // last command from the dashboard
+bool forcedFull = false;       // a forced run reached 100%; wait for a new command
+unsigned long lastCommandAt = 0;
+unsigned long lastTick = 0;
 
 unsigned long lastSensorRead = 0;
 unsigned long bootTime = 0;
@@ -146,10 +166,14 @@ void setup() {
 // ============================================
 void loop() {
   unsigned long now = millis();
+  readCommands();
 
   if (now - lastSensorRead >= SENSOR_INTERVAL_MS) {
     lastSensorRead = now;
+    unsigned long dt = now - lastTick;
+    lastTick = now;
     readSensors();
+    if (pumpOn) addInflow(dt);
     updateWaterLevel();
     updatePump();
     updateIndicators();
@@ -159,9 +183,42 @@ void loop() {
   }
 
   if (pumpOn) {
-    unsigned long started = millis();
     pumpMotor.step(STEPS_PER_CHUNK);
-    pumpRunMs += millis() - started;
+  }
+}
+
+// ============================================
+// COMMANDS FROM THE DASHBOARD (via the bridge)
+// ============================================
+void readCommands() {
+  while (Serial.available()) {
+    char c = Serial.read();
+    if (c != 'A' && c != '1' && c != '0' && c != 'S') continue;  // skips newlines
+    lastCommandAt = millis();
+    if (c != pumpMode) {
+      pumpMode = c;
+      forcedFull = false;
+      Serial.print(F("MODE: "));
+      Serial.println(c);
+    }
+  }
+  if (pumpMode != 'A' && millis() - lastCommandAt > COMMAND_TIMEOUT_MS) {
+    pumpMode = 'A';
+    Serial.println(F("MODE: A (no commands, back to automatic)"));
+  }
+}
+
+// Wall-clock run time drives both the volume meter and the simulated level,
+// so the liters reported always match how far the level rose.
+void addInflow(unsigned long dt) {
+  pumpRunMs += dt;
+  fillAccumMs += dt;
+  while (fillAccumMs >= FILL_STEP_MS) {
+    fillAccumMs -= FILL_STEP_MS;
+    if (levelPercent < 100) {
+      levelPercent = min(100, levelPercent + FILL_STEP_PERCENT);
+      lastFillAt = millis();
+    }
   }
 }
 
@@ -176,8 +233,12 @@ void readSensors() {
   rawLevel = sum / LEVEL_SAMPLES;
   waterSensorValue = analogRead(WATER_SENSOR_PIN);
 
-  // Always track the true ends of the range so 0% and 100% are reachable.
-  if (abs(rawLevel - lastLevelRaw) >= LEVEL_DEADBAND_RAW || rawLevel <= 2 || rawLevel >= 1021) {
+  // The knob only takes over the level when it is actually turned; otherwise
+  // the simulated inflow keeps whatever it has added. The end checks make 0%
+  // and 100% reachable without being re-applied on every read.
+  bool moved = abs(rawLevel - lastLevelRaw) >= LEVEL_DEADBAND_RAW;
+  bool hitEnd = (rawLevel <= 2 && lastLevelRaw > 2) || (rawLevel >= 1021 && lastLevelRaw < 1021);
+  if (moved || hitEnd) {
     lastLevelRaw = rawLevel;
     levelPercent = map(rawLevel, 0, 1023, 0, 100);
     levelPercent = constrain(levelPercent, 0, 100);
@@ -205,18 +266,34 @@ void updateWaterLevel() {
 }
 
 // ============================================
-// AUTOMATIC PUMP CONTROL
+// PUMP CONTROL
 // ============================================
 void updatePump() {
-  if (!pumpOn && levelPercent <= PUMP_START_PERCENT) {
-    pumpOn = true;
-    Serial.println(F("PUMP: ON - tank low, refilling."));
+  bool forced = pumpMode == '1' || pumpMode == 'S';
+  if (forced && levelPercent >= 100) forcedFull = true;  // never overfill
+
+  bool want = pumpOn;
+  if (pumpMode == '0') {
+    want = false;
+  }
+  else if (forced) {
+    want = !forcedFull;
+  }
+  else if (!pumpOn && levelPercent <= PUMP_START_PERCENT) {
+    want = true;   // automatic: tank low
   }
   else if (pumpOn && levelPercent >= PUMP_STOP_PERCENT) {
-    pumpOn = false;
+    want = false;  // automatic: refilled
+  }
+  if (want == pumpOn) return;
+
+  pumpOn = want;
+  if (pumpOn) {
+    Serial.println(F("PUMP: ON"));
+  } else {
     releaseMotor();
-    fullBannerUntil = millis() + FULL_BANNER_MS;
-    Serial.println(F("PUMP: OFF - tank full."));
+    if (levelPercent >= PUMP_STOP_PERCENT) fullBannerUntil = millis() + FULL_BANNER_MS;
+    Serial.println(F("PUMP: OFF"));
   }
 }
 
@@ -298,14 +375,22 @@ void drawScreen() {
   bool blink = frame % 2 == 0;
   bool showFull = millis() < fullBannerUntil;
   long liters = (long)levelPercent * TANK_CAPACITY_L / 100;
-  float pumpedL = pumpRunMs / 60000.0 * PUMP_FLOW_LPM;
+  long pumpedL = pumpRunMs / 60000.0 * PUMP_FLOW_LPM;
   char buf[24];
 
   oled.firstPage();
   do {
-    // Header: brand on the left, pump state pill on the right.
+    // Header: who is in charge on the left, pump state pill on the right.
     oled.setFont(u8g2_font_5x8_tr);
-    oled.drawStr(0, 7, "WATERSENSE");
+    if (pumpMode == 'A') {
+      oled.drawStr(0, 8, "AUTO");
+    } else {
+      const char* tag = pumpMode == 'S' ? "TIMER" : "MANUAL";
+      oled.drawRBox(0, 0, oled.getStrWidth(tag) + 6, 10, 2);
+      oled.setDrawColor(0);
+      oled.drawStr(3, 8, tag);
+      oled.setDrawColor(1);
+    }
     if (pumpOn) {
       oled.drawRBox(80, 0, 48, 10, 2);
       oled.setDrawColor(0);
@@ -328,6 +413,10 @@ void drawScreen() {
     oled.drawStr(numX, 42, buf);
     oled.setFont(u8g2_font_helvB10_tr);
     oled.drawStr(numX + numW + 2, 42, "%");
+    if (millis() - lastFillAt < 900) {
+      oled.setFont(u8g2_font_5x8_tr);
+      oled.drawStr(numX + numW + 4, 24, "+1");  // flashes on each inflow step
+    }
 
     // Liters in the tank.
     oled.setFont(u8g2_font_6x10_tf);
@@ -348,10 +437,11 @@ void drawScreen() {
       oled.drawStr(48, 63, "TANK FULL");
       oled.setDrawColor(1);
     } else if (pumpOn) {
-      dtostrf(pumpedL, 0, 1, buf);
-      strcat(buf, " L pumped");
+      snprintf(buf, sizeof(buf), "%ld L pumped", pumpedL);
       oled.drawStr(40, 63, buf);
-    } else if (levelPercent >= PUMP_STOP_PERCENT) {
+    } else if (pumpMode == '0') {
+      oled.drawStr(40, 63, "Held off (app)");
+    } else if (forcedFull || levelPercent >= PUMP_STOP_PERCENT) {
       oled.drawStr(40, 63, "Full - standby");
     } else {
       snprintf(buf, sizeof(buf), "Auto at %d%%", PUMP_START_PERCENT);
@@ -411,6 +501,10 @@ void sendTelemetryJSON() {
   Serial.print(pumpOn ? "true" : "false");
   Serial.print(F(",\"pump_run_ms\":"));
   Serial.print(pumpRunMs);
+  Serial.print(F(",\"pump_mode\":\""));
+  Serial.print(pumpMode);
+  Serial.print(F("\",\"flow_lpm\":"));
+  Serial.print(PUMP_FLOW_LPM, 0);
   Serial.print(F(",\"water_contact\":"));
   Serial.print(waterDetected ? "true" : "false");
   // The PIR reads garbage while warming up, so leave motion out until then.

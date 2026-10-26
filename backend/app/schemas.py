@@ -26,6 +26,10 @@ class Device(BaseModel):
     level_raw: int|None=Field(None, ge=0, le=4095)
     water_contact: bool|None=None
     motion: bool|None=None
+    # Command the controller is currently obeying (A/1/0/S, see pump_control)
+    # and the flow rate it simulates, used to meter pumped volume.
+    pump_mode: Literal["A","1","0","S"]|None=None
+    flow_lpm: float|None=Field(None, gt=0, le=100000)
 class TelemetryIn(BaseModel):
     station_code: str
     timestamp: datetime|None=None
@@ -94,3 +98,10 @@ class SurveyIn(BaseModel):
             cleaned="".join(ch for ch in cleaned if ch.isprintable() or ch in "\n\t").strip()
             object.__setattr__(self,"other_comments",cleaned or None)
         return self
+
+class PumpControlIn(BaseModel):
+    mode: Literal["auto","on","off"]
+class PumpScheduleIn(BaseModel):
+    start_time: str=Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    duration_minutes: int=Field(ge=1, le=720)
+    repeat: Literal["once","daily"]="once"

@@ -8,6 +8,10 @@ os.environ.setdefault("SURVEY_ADMIN_KEY", "test-admin-key")
 
 
 def pytest_sessionfinish(session, exitstatus):
+    # Windows refuses to delete a file with open handles: close the pool first,
+    # or the next run inherits this run's rows (duplicate survey keys etc.).
+    from app.core import engine
+    engine.dispose()
     for suffix in ("", "-wal", "-shm"):
         try: os.remove("test_watersense.db" + suffix)
         except OSError: pass

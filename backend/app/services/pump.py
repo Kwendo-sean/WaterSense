@@ -1,6 +1,6 @@
 import os
 from collections import defaultdict
-from datetime import timezone
+from datetime import timezone, timedelta
 from zoneinfo import ZoneInfo
 
 LOW_THRESHOLD=20.0
@@ -26,25 +26,51 @@ def _local(dt):
     except Exception: return dt
     return dt.replace(tzinfo=timezone.utc).astimezone(tz)
 
-def predict_pump_schedule(events):
+def predict_pump_schedule(events, now=None):
     """events: [{"triggered_at":datetime,"volume_liters":float|None}, ...] completed cycles only.
-    Aggregates by (weekday, hour) to recommend when the next pump run is likely and how much it
-    will need to move. Deterministic statistics over observed history, not a trained model."""
+    Finds the hour of the day the pump most often starts and projects its next occurrence
+    (later today, else tomorrow). Deterministic statistics over observed history, not a
+    trained model. Daily rather than weekly: a week-by-hour grid needs weeks of history
+    before any one cell means anything."""
     # A cycle that moved no water carries no information about demand.
     timed=[e for e in events if (e.get("volume_liters") or 0)>0]
     if not timed: return None
-    buckets=defaultdict(list)
+    by_hour=defaultdict(list);days_by_hour=defaultdict(set);daily=defaultdict(lambda:[0.0,0])
     for e in timed:
-        t=_local(e["triggered_at"]);buckets[(t.weekday(),t.hour)].append(e["volume_liters"])
-    (weekday,hour),volumes=sorted(buckets.items(),key=lambda kv:(-len(kv[1]),-sum(kv[1])))[0]
-    daily=defaultdict(float)
-    for e in timed: daily[_local(e["triggered_at"]).date()]+=e["volume_liters"]
-    avg_daily=sum(daily.values())/len(daily)
+        t=_local(e["triggered_at"])
+        by_hour[t.hour].append(e["volume_liters"]);days_by_hour[t.hour].add(t.date())
+        daily[t.date()][0]+=e["volume_liters"];daily[t.date()][1]+=1
+    # Rank by how many different days the hour recurs on, so one busy test session
+    # doesn't outweigh a habit seen every day.
+    hour=max(by_hour,key=lambda h:(len(days_by_hour[h]),len(by_hour[h]),sum(by_hour[h])))
+    volumes=by_hour[hour]
+    local_now=_local(now) if now is not None else None
+    next_run=None
+    if local_now is not None:
+        next_run=local_now.replace(hour=hour,minute=0,second=0,microsecond=0)
+        if next_run<=local_now: next_run+=timedelta(days=1)
+    recurring=len(days_by_hour[hour])
     return {
-        "predicted_weekday":DAYS[weekday],
+        "predicted_weekday":DAYS[(next_run or _local(timed[0]["triggered_at"])).weekday()],
         "predicted_hour":hour,
+        "next_run_at":next_run.isoformat() if next_run else None,
         "predicted_volume_liters":round(sum(volumes)/len(volumes),1),
-        "avg_daily_volume_liters":round(avg_daily,1),
+        "avg_daily_volume_liters":round(sum(v for v,_ in daily.values())/len(daily),1),
+        "avg_daily_cycles":round(sum(n for _,n in daily.values())/len(daily),1),
+        "days_observed":len(daily),
+        "days_at_hour":recurring,
         "sample_size":len(timed),
-        "confidence":round(min(95,40+len(timed)*3),1),
+        "confidence":round(min(95,30+recurring*12+min(len(volumes),10)),1),
     }
+
+def daily_pump_stats(events, now, days=7):
+    """Volume and cycle count per local calendar day, oldest first, ending today.
+    events may include the running cycle; its volume so far counts toward today."""
+    today=_local(now).date()
+    out={today-timedelta(days=i):{"volume_liters":0.0,"cycles":0} for i in range(days-1,-1,-1)}
+    for e in events:
+        d=_local(e["triggered_at"]).date()
+        if d in out:
+            out[d]["volume_liters"]+=e.get("volume_liters") or 0.0
+            out[d]["cycles"]+=1
+    return [{"date":d.isoformat(),"volume_liters":round(v["volume_liters"],1),"cycles":v["cycles"]} for d,v in out.items()]

@@ -120,3 +120,26 @@ class Forecast(Base):
     predicted_value: Mapped[float]=mapped_column(Float)
     confidence: Mapped[float]=mapped_column(Float)
     forecast_metadata: Mapped[dict]=mapped_column("metadata", JSON, default=dict)
+
+class PumpControl(Base):
+    """Operator override for a hardware pump. "auto" leaves the controller's own
+    float-switch logic in charge; "on"/"off" force the motor until changed."""
+    __tablename__="pump_controls"
+    station_id: Mapped[int]=mapped_column(ForeignKey("stations.id"), primary_key=True)
+    mode: Mapped[str]=mapped_column(String, default="auto")
+    updated_at: Mapped[datetime]=mapped_column(DateTime, default=now, onupdate=now)
+
+class PumpSchedule(Base):
+    """Run the pump at a local wall-clock time for a fixed duration, once or daily."""
+    __tablename__="pump_schedules"
+    id: Mapped[int]=mapped_column(primary_key=True)
+    station_id: Mapped[int]=mapped_column(ForeignKey("stations.id"), index=True)
+    start_time: Mapped[str]=mapped_column(String)  # "HH:MM", site local time
+    duration_minutes: Mapped[int]=mapped_column(Integer)
+    repeat: Mapped[str]=mapped_column(String, default="once")  # once | daily
+    run_date: Mapped[str|None]=mapped_column(String, nullable=True)  # local date a "once" schedule fires
+    enabled: Mapped[bool]=mapped_column(Boolean, default=True)
+    # Local date of the last window that finished (or was cut short by a full
+    # tank), so a window never re-runs the same day.
+    done_on: Mapped[str|None]=mapped_column(String, nullable=True)
+    created_at: Mapped[datetime]=mapped_column(DateTime, default=now)

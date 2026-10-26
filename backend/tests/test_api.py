@@ -10,7 +10,7 @@ ADMIN = {"X-Admin-Key": "test-admin-key"}
 def test_health_and_telemetry_pipeline():
     with TestClient(app) as client:
         stations = client.get("/api/v1/stations", headers=ADMIN).json()
-        assert len(stations) >= 12
+        assert any(s["station_code"] == "WS-PROTOTYPE-01" for s in stations)
         code = stations[0]["station_code"]
         response = client.post("/api/v1/telemetry", json={
             "station_code": code,
