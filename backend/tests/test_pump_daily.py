@@ -6,7 +6,7 @@ from sqlalchemy import select
 from app.main import app
 from app.core import SessionLocal
 from app.models import Station, PumpEvent
-from app.seed import prune_to_prototype, PROTOTYPE_CODE
+from app.seed import prune_to_prototype, PROTOTYPE_CODES
 from app.services.pump import predict_pump_schedule, daily_pump_stats
 
 ADMIN = {"X-Admin-Key": "test-admin-key"}
@@ -64,6 +64,23 @@ def test_series_buckets_level_and_pump_share():
         assert len(pump["daily"]) == 7 and pump["today"] == pump["daily"][-1]
 
 
+def test_esp32_rig_reports_sensors_without_a_pump():
+    with TestClient(app) as client:
+        sid = next(s["id"] for s in client.get("/api/v1/stations", headers=ADMIN).json() if s["station_code"] == "WS-PROTOTYPE-02")
+        # 10% would start a pump on any other station.
+        r = client.post("/api/v1/telemetry", json={"station_code": "WS-PROTOTYPE-02", "metrics": {"water_level_percent": 10, "flow_rate_l_min": 2.5},
+                        "device": {"source": "esp32", "distance_cm": 92.5, "flow_total_liters": 1.25}})
+        assert r.status_code == 200
+        latest = client.get(f"/api/v1/stations/{sid}/latest", headers=ADMIN).json()
+        assert latest["reading"]["source"] == "esp32" and latest["reading"]["distance_cm"] == 92.5
+        assert latest["reading"]["flow_total_liters"] == 1.25 and latest["station"]["pump_status"] == "off"
+        ai = client.get(f"/api/v1/stations/{sid}/insights", headers=ADMIN).json()
+        assert "Tank is low but the pump is off" not in [f["title"] for f in ai["findings"]]
+        assert "No pump is wired" in ai["summary"]
+    with SessionLocal() as db:
+        assert db.scalar(select(PumpEvent).where(PumpEvent.station_id == sid)) is None
+
+
 def test_prune_keeps_only_the_prototype_in_nairobi():
     with TestClient(app) as client:
         client.post("/api/v1/stations", headers=ADMIN, json={
@@ -74,6 +91,6 @@ def test_prune_keeps_only_the_prototype_in_nairobi():
     assert prune_to_prototype() >= 1
     with SessionLocal() as db:
         stations = db.scalars(select(Station)).all()
-        assert [s.station_code for s in stations] == [PROTOTYPE_CODE]
-        assert stations[0].location_text == "Nairobi, Kenya"
-        assert db.scalar(select(PumpEvent).where(PumpEvent.station_id != stations[0].id)) is None
+        assert sorted(s.station_code for s in stations) == sorted(PROTOTYPE_CODES)
+        assert {s.location_text for s in stations} == {"Nairobi, Kenya"}
+        assert db.scalar(select(PumpEvent).where(PumpEvent.station_id.not_in([s.id for s in stations]))) is None

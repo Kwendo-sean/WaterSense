@@ -31,7 +31,7 @@ def station_dict(s):
 def pump_event_dict(e):
     return {"id":e.id,"station_id":e.station_id,"triggered_at":iso(e.triggered_at),"trigger_level":e.trigger_level,"stopped_at":iso(e.stopped_at),"stop_level":e.stop_level,"volume_liters":e.volume_liters}
 
-DEVICE_STATE_KEYS=("pump_on","pump_run_ms","level_raw","water_contact","motion","pump_mode","flow_lpm")
+DEVICE_STATE_KEYS=("pump_on","pump_run_ms","level_raw","water_contact","motion","pump_mode","flow_lpm","distance_cm","flow_total_liters")
 
 def device_state(r):
     d=(r.raw_payload or {}).get("device") or {}
@@ -114,7 +114,7 @@ def _ingest_sync(payload: dict[str,Any]):
         if data.device.pump_on is not None:
             if _apply_device_pump(db,station,reading,data.device,prev_device,level):
                 pump_changed={"station_id":station.id,"station_code":station.station_code,"pump_status":station.pump_status,"water_level_percent":level,"timestamp":iso(reading.timestamp)}
-        elif level is not None:
+        elif level is not None and station.source_type!="esp32":  # the ESP32 rig has no pump to infer
             new_pump_status,action=evaluate_pump(station.pump_status,level,station.pump_capacity_liters)
             if action:
                 if action[0]=="start":
@@ -353,7 +353,8 @@ def station_insights(station_id:int,_:None=Depends(require_admin)):
             readings.append({"timestamp":ts,"level":lvl,"pump_on":d.get("pump_on"),"water_contact":d.get("water_contact"),"motion":d.get("motion")})
         out=analyze_tank(now=now,capacity_liters=station.pump_capacity_liters,flow_lpm=_device_flow(db,station_id),readings=readings,
             events=[{"triggered_at":e.triggered_at,"stopped_at":e.stopped_at,"volume_liters":e.volume_liters} for e in events],
-            pump_on_fallback=station.pump_status=="on")
+            pump_on_fallback=station.pump_status=="on",
+            has_pump=station.source_type!="esp32" or any(r["pump_on"] is not None for r in readings))
         return {**out,"station_id":station.id,"generated_at":iso(out["generated_at"])}
 
 @app.get("/api/v1/alerts")

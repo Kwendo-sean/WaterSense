@@ -113,7 +113,7 @@ function AiMetrics({m}:{m:any}){
 const RANGES:[string,number][]=[["LIVE",0],["1H",60],["6H",360],["24H",1440],["7D",10080]];
 function bucketLabel(s:number){return s<60?`${s}-SECOND`:s<3600?`${Math.round(s/60)}-MINUTE`:`${Math.round(s/3600)}-HOUR`}
 
-function LevelChart({id,rows}:{id:number;rows:any[]}){
+function LevelChart({id,rows,hasPump}:{id:number;rows:any[];hasPump:boolean}){
   const [minutes,setMinutes]=useState(0);
   const [full,toggleFull]=useFullscreen();
   const series=useQuery({queryKey:["series",id,minutes],queryFn:()=>api.series(id,minutes),enabled:minutes>0,
@@ -126,7 +126,7 @@ function LevelChart({id,rows}:{id:number;rows:any[]}){
   const caption=live?`LIVE · LAST ${rows.length} READINGS`:series.data?`LAST ${RANGES.find(r=>r[1]===minutes)![0].replace("H"," HOURS").replace("D"," DAYS")} · ${bucketLabel(series.data.bucket_seconds)} AVERAGES`:"LOADING HISTORY…";
   return <section className={`panel history-panel ${full?"is-fullscreen":""}`}>
     <div className="panel-head">
-      <div><span>{caption}</span><h2>Tank level and pump activity</h2></div>
+      <div><span>{caption}</span><h2>{hasPump?"Tank level and pump activity":"Tank level"}</h2></div>
       <div className="chart-tools">
         <div className="seg small" role="group" aria-label="Time range">{RANGES.map(([label,m])=><button key={label} className={minutes===m?"active":""} onClick={()=>setMinutes(m)}>{label}</button>)}</div>
         <FullscreenButton on={full} toggle={toggleFull}/>
@@ -142,15 +142,15 @@ function LevelChart({id,rows}:{id:number;rows:any[]}){
           <YAxis domain={[0,100]} stroke="#68838c" unit="%"/>
           <Tooltip contentStyle={{background:"#071b23",border:"1px solid #25414a"}} formatter={(v:any,n:any)=>
             n==="Pump"?[live?(v?"ON":"OFF"):`ran ${v}% of the time`,n]:n==="Range"?[`${v[0]}% – ${v[1]}%`,n]:[`${v}%`,n]}/>
-          <Area type="stepAfter" dataKey="pump" stroke="none" fill="#55e68a" fillOpacity={.12} name="Pump" isAnimationActive={false}/>
+          {hasPump&&<Area type="stepAfter" dataKey="pump" stroke="none" fill="#55e68a" fillOpacity={.12} name="Pump" isAnimationActive={false}/>}
           {!live&&<Area type="monotone" dataKey="band" stroke="none" fill="#23d5e7" fillOpacity={.12} name="Range" isAnimationActive={false}/>}
           <Area type="monotone" dataKey="level" stroke="#23d5e7" fill={live?"url(#lvl)":"none"} name="Level" isAnimationActive={false} dot={false}/>
-          <ReferenceLine y={STOP_PERCENT} stroke="#55e68a" strokeDasharray="4 4" label={{value:`STOP ${STOP_PERCENT}%`,fill:"#55e68a",fontSize:9,position:"insideTopRight"}}/>
-          <ReferenceLine y={START_PERCENT} stroke="#ffb547" strokeDasharray="4 4" label={{value:`START ${START_PERCENT}%`,fill:"#ffb547",fontSize:9,position:"insideBottomRight"}}/>
+          {hasPump&&<ReferenceLine y={STOP_PERCENT} stroke="#55e68a" strokeDasharray="4 4" label={{value:`STOP ${STOP_PERCENT}%`,fill:"#55e68a",fontSize:9,position:"insideTopRight"}}/>}
+          {hasPump&&<ReferenceLine y={START_PERCENT} stroke="#ffb547" strokeDasharray="4 4" label={{value:`START ${START_PERCENT}%`,fill:"#ffb547",fontSize:9,position:"insideBottomRight"}}/>}
         </AreaChart>
       </ResponsiveContainer>}
     </div>
-    <div className="chart-key"><span><i className="cyan"/>{live?"Tank level":"Average level (shaded: low–high)"}</span><span><i className="green"/>{live?"Pump running":"Share of time the pump ran"}</span><span>Dashed lines: automatic start / stop points</span></div>
+    <div className="chart-key"><span><i className="cyan"/>{live?"Tank level":"Average level (shaded: low–high)"}</span>{hasPump&&<><span><i className="green"/>{live?"Pump running":"Share of time the pump ran"}</span><span>Dashed lines: automatic start / stop points</span></>}</div>
   </section>;
 }
 
@@ -160,7 +160,9 @@ export default function HardwareStation({id,station,reading}:{id:number;station:
   // Recomputed server-side over the last hour of readings, so poll it rather than refetch on every push.
   const insights=useQuery({queryKey:["insights",id],queryFn:()=>api.insights(id),refetchInterval:1500});
 
-  const rows=(history.data||[]).filter((r:any)=>r.source==="arduino");
+  const rows=(history.data||[]).filter((r:any)=>r.source==="arduino"||r.source==="esp32");
+  // The ESP32 rig reports sensors only until a pump is wired to it.
+  const hasPump=reading.source!=="esp32"||reading.pump_on!=null;
   const level=reading.water_level_percent??0;
   const capacity=station.pump_capacity_liters;
   const pumpOn=reading.pump_on??station.pump_status==="on";
@@ -182,25 +184,32 @@ export default function HardwareStation({id,station,reading}:{id:number;station:
       <div>
         <span>{station.station_code} · <i>LIVE HARDWARE</i></span>
         <h1>{station.name}</h1>
-        <p>{station.location_text} / ARDUINO UNO · AUTOMATIC PUMP CONTROLLER</p>
+        <p>{station.location_text} / {hasPump?"ARDUINO UNO · AUTOMATIC PUMP CONTROLLER":"ESP32-S3 · LEVEL AND FLOW SENSORS"}</p>
       </div>
       <div className={`station-risk ${pillClass}`}>
         <span className={`status status-${pillClass}`}><i/>{pillLabel}</span>
-        <strong>{fmt(level,0)}<small>%</small></strong>
+        <strong>{reading.water_level_percent==null?"—":fmt(level,0)}<small>%</small></strong>
         <span>TANK LEVEL</span>
         <p><Clock/> UPDATED {clock(reading.timestamp)}</p>
       </div>
     </header>
 
-    <section className="telemetry-blocks hw-sensors">
+    {!hasPump&&<section className="telemetry-blocks hw-sensors">
+      <div className="telemetry-block"><span>WATER LEVEL</span><div><b>{reading.water_level_percent==null?"—":fmt(level,0)}</b><small>%</small></div><svg viewBox="0 0 160 30"><path d={sparkPath(levelSeries)}/></svg><p className="hw-sub">{reading.water_level_percent==null?"no echo from the sensor":"JSN-SR04T ultrasonic"}</p></div>
+      <div className="telemetry-block"><span>DISTANCE TO WATER</span><div><b>{reading.distance_cm==null?"—":fmt(reading.distance_cm,1)}</b><small>cm</small></div><p className="hw-sub">probe to water surface</p></div>
+      <div className={`telemetry-block hw-pump ${reading.flow_rate_l_min>0?"on":""}`}><span>FLOW RATE</span><div><b>{fmt(reading.flow_rate_l_min,1)}</b><small>L/min</small></div><p className="hw-sub">YF-S201 flow sensor</p></div>
+      <div className="telemetry-block"><span>TOTAL FLOW</span><div><b>{fmt(reading.flow_total_liters,2)}</b><small>L</small></div><p className="hw-sub">since the board restarted</p></div>
+    </section>}
+
+    {hasPump&&<section className="telemetry-blocks hw-sensors">
       <div className="telemetry-block"><span>WATER LEVEL</span><div><b>{fmt(level,0)}</b><small>%</small></div><svg viewBox="0 0 160 30"><path d={sparkPath(levelSeries)}/></svg><p><i/> RAW ADC {reading.level_raw??"—"}</p></div>
       <div className="telemetry-block"><span>WATER IN TANK</span><div><b>{Math.round(level/100*capacity).toLocaleString()}</b><small>L</small></div><p className="hw-sub">of {capacity.toLocaleString()} L capacity</p></div>
       <div className={`telemetry-block hw-pump ${pumpOn?"on":""}`}><span>PUMP MOTOR</span><div><b>{pumpOn?"ON":"OFF"}</b></div><p className="hw-sub">{pumpOn?`running ${duration(cycleMs)}`:reading.pump_mode==="0"?"held off from dashboard":`starts at ≤${START_PERCENT}%`}</p></div>
       <div className={`telemetry-block ${reading.water_contact?"hw-alert":""}`}><span>WATER CONTACT</span><div><b>{reading.water_contact==null?"—":reading.water_contact?"WET":"DRY"}</b></div><p className="hw-sub">base leak sensor</p></div>
       <div className="telemetry-block"><span>MOTION</span><div><b>{reading.motion==null?"—":reading.motion?"YES":"NONE"}</b></div><p className="hw-sub">{reading.motion==null?"PIR warming up":"PIR sensor"}</p></div>
-    </section>
+    </section>}
 
-    <section className="pump-panel lead">
+    {hasPump&&<section className="pump-panel lead">
       <div className="pump-head"><Droplet/><span>PUMP CONTROL</span></div>
       <div className="pump-top">
         <div className={`pump-indicator ${pumpOn?"on":"off"}`}><Power/>{pumpOn?"PUMPING NOW":"IDLE"}</div>
@@ -223,13 +232,13 @@ export default function HardwareStation({id,station,reading}:{id:number;station:
         </div>)}
       </div>}
       {pump.data?.recent_events?.length>0&&<div className="pump-history"><span>RECENT CYCLES</span>{pump.data.recent_events.slice(0,6).map((e:any)=><div key={e.id}><time>{new Date(e.triggered_at).toLocaleString([],{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"})}</time><b>{fmt(e.volume_liters,1)} L</b><time>{fmt(e.trigger_level,0)}% → {fmt(e.stop_level,0)}%</time></div>)}</div>}
-    </section>
+    </section>}
 
     <div className="station-grid">
-      <LevelChart id={id} rows={rows}/>
+      <LevelChart id={id} rows={rows} hasPump={hasPump}/>
 
       <section className={`ai-panel ${pillClass} ${aiFull?"is-fullscreen":""}`}>
-        <div className="ai-title"><BrainCircuit/><span>WATERSENSE AI · TANK &amp; PUMP</span><FullscreenButton on={aiFull} toggle={toggleAiFull}/></div>
+        <div className="ai-title"><BrainCircuit/><span>WATERSENSE AI · {hasPump?"TANK & PUMP":"TANK & FLOW"}</span><FullscreenButton on={aiFull} toggle={toggleAiFull}/></div>
         <span className={`status status-${pillClass}`}><i/>{pillLabel}</span>
         {ai?<div className="ai-body">
           <div>
@@ -251,16 +260,16 @@ export default function HardwareStation({id,station,reading}:{id:number;station:
       <section className="device-log">
         <div className="pump-head"><Radio/><span>LIVE TELEMETRY LOG</span><i className="log-pulse"/></div>
         <div className="device-log-rows">
-          {[...rows].reverse().slice(0,40).map((r:any)=><div key={r.id}><time>{clock(r.timestamp)}</time><span>LEVEL <b>{fmt(r.water_level_percent,0)}%</b></span><em className={r.pump_on?"on":""}>{r.pump_on==null?"—":r.pump_on?"PUMP ON":"PUMP OFF"}</em><em>{r.pump_run_ms!=null?`motor ${duration(r.pump_run_ms)}`:""}</em>{r.pump_mode&&r.pump_mode!=="A"&&<em className="mode">{COMMAND_LABEL[r.pump_mode]}</em>}</div>)}
+          {[...rows].reverse().slice(0,40).map((r:any)=><div key={r.id}><time>{clock(r.timestamp)}</time><span>LEVEL <b>{fmt(r.water_level_percent,0)}%</b></span>{hasPump?<em className={r.pump_on?"on":""}>{r.pump_on==null?"—":r.pump_on?"PUMP ON":"PUMP OFF"}</em>:<em className={r.flow_rate_l_min>0?"on":""}>{fmt(r.flow_rate_l_min,1)} L/min</em>}<em>{hasPump?(r.pump_run_ms!=null?`motor ${duration(r.pump_run_ms)}`:""):(r.distance_cm!=null?`${fmt(r.distance_cm,1)} cm`:"no echo")}</em>{r.pump_mode&&r.pump_mode!=="A"&&<em className="mode">{COMMAND_LABEL[r.pump_mode]}</em>}</div>)}
           {!rows.length&&<p className="pump-empty">Waiting for the first reading from the device…</p>}
         </div>
       </section>
       <section className="device-card">
         <Radio/><span>CONNECTION</span>
         <strong>{ai?.metrics?.last_seen_seconds!=null&&ai.metrics.last_seen_seconds>30?"OFFLINE":"LIVE HARDWARE"}</strong>
-        <p>Arduino Uno over USB serial, about 2 readings per second</p>
+        <p>{hasPump?"Arduino Uno over USB serial, about 2 readings per second":"ESP32-S3 over USB serial, about 1 reading per second"}</p>
         <p>Last reading {clock(reading.timestamp)}</p>
-        <p>Pump ran {ai?.metrics?.duty_cycle_percent_1h!=null?`${fmt(ai.metrics.duty_cycle_percent_1h,0)}%`:"—"} of the last hour</p>
+        {hasPump&&<p>Pump ran {ai?.metrics?.duty_cycle_percent_1h!=null?`${fmt(ai.metrics.duty_cycle_percent_1h,0)}%`:"—"} of the last hour</p>}
       </section>
     </div>
     <Disclaimer/>

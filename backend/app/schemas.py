@@ -30,6 +30,9 @@ class Device(BaseModel):
     # and the flow rate it simulates, used to meter pumped volume.
     pump_mode: Literal["A","1","0","S"]|None=None
     flow_lpm: float|None=Field(None, gt=0, le=100000)
+    # Raw ultrasonic reading and flow-meter total since boot (ESP32 rig).
+    distance_cm: float|None=Field(None, ge=0, le=1000)
+    flow_total_liters: float|None=Field(None, ge=0)
 class TelemetryIn(BaseModel):
     station_code: str
     timestamp: datetime|None=None

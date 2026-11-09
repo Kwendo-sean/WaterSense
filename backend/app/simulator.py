@@ -3,6 +3,7 @@ from datetime import datetime,timezone
 from sqlalchemy import select
 from .core import SessionLocal
 from .models import Station
+from .seed import PROTOTYPE_CODES
 
 class Simulator:
     def __init__(self): self.running=False;self.interval=float(os.getenv("SIMULATOR_INTERVAL_SECONDS","3"));self.task=None;self.scenarios={};self.steps={};self.overrides={};self.ingest=None
@@ -19,7 +20,7 @@ class Simulator:
         while self.running:
             db=SessionLocal();stations=db.scalars(select(Station)).all();db.close()
             for st in stations:
-                if st.station_code=="WS-PROTOTYPE-01":continue
+                if st.station_code in PROTOTYPE_CODES:continue
                 scenario=self.scenarios.get(st.id,"NORMAL");step=self.steps.get(st.id,0);self.steps[st.id]=step+1
                 noise=lambda n:random.uniform(-n,n)
                 m={"ph":7.1+noise(.08),"turbidity_ntu":2.4+noise(.3),"temperature_c":23+noise(.5),"conductivity_us_cm":415+noise(12),"tds_ppm":208+noise(5),"water_level_percent":70+noise(1),"flow_rate_l_min":4.7+noise(.3)}

@@ -12,10 +12,10 @@ import argparse,json,time,urllib.request
 try: import serial
 except ImportError: serial=None
 METRICS={"ph","turbidity_ntu","temperature_c","conductivity_us_cm","tds_ppm","water_level_percent","flow_rate_l_min"}
-DEVICE_FIELDS={"battery_percent","pump_on","pump_run_ms","level_raw","water_contact","motion","pump_mode","flow_lpm"}
+DEVICE_FIELDS={"battery_percent","pump_on","pump_run_ms","level_raw","water_contact","motion","pump_mode","flow_lpm","distance_cm","flow_total_liters"}
 def normalize(raw):
     return {"station_code":raw["station_code"],"metrics":{k:v for k,v in raw.items() if k in METRICS},
-            "device":{"source":"arduino",**{k:v for k,v in raw.items() if k in DEVICE_FIELDS}}}
+            "device":{"source":raw.get("source","arduino"),**{k:v for k,v in raw.items() if k in DEVICE_FIELDS}}}
 def forward(url,payload):
     req=urllib.request.Request(url,data=json.dumps(payload).encode(),headers={"Content-Type":"application/json"},method="POST")
     with urllib.request.urlopen(req,timeout=10) as response:return json.load(response)

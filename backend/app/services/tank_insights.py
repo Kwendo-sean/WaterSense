@@ -48,7 +48,7 @@ def _fmt_minutes(m):
     if m<90: return f"{m:.0f} min"
     return f"{m/60:.1f} h"
 
-def analyze_tank(*,now,capacity_liters,flow_lpm,readings,events,pump_on_fallback):
+def analyze_tank(*,now,capacity_liters,flow_lpm,readings,events,pump_on_fallback,has_pump=True):
     """readings: ascending dicts {timestamp, level, pump_on, water_contact, motion}.
     events: pump cycles (newest first) as dicts {triggered_at, stopped_at, volume_liters}."""
     base={"engine":"deterministic","model_version":MODEL_VERSION,"generated_at":now}
@@ -83,7 +83,7 @@ def analyze_tank(*,now,capacity_liters,flow_lpm,readings,events,pump_on_fallback
         add("critical","Device offline",f"No reading for {last_seen:.0f} s. Everything below describes the last known state.")
     if last.get("water_contact"):
         add("critical","Water detected at the tank base","The contact sensor is wet. That usually points to a leak, an overflow or a dripping fitting near the tank or pump.")
-    if not pump_on and level<=LOW_THRESHOLD:
+    if has_pump and not pump_on and level<=LOW_THRESHOLD:
         add("critical","Tank is low but the pump is off",f"Level is {level:.0f}%, at or below the {LOW_THRESHOLD:.0f}% start point, yet the pump is not running. Check the controller and the pump's power supply.")
     if pump_on and level>=HIGH_THRESHOLD+5:
         add("critical","Pump still running above the full mark",f"Level is {level:.0f}% with the pump on; it should have stopped at {HIGH_THRESHOLD:.0f}%. Overflow risk. Check the stop control.")
@@ -96,27 +96,31 @@ def analyze_tank(*,now,capacity_liters,flow_lpm,readings,events,pump_on_fallback
     if level<=10:
         add("warning","Tank nearly empty",f"Only about {liters:.0f} L left ({level:.0f}%). Supply could run out before the refill catches up.")
     if not findings:
-        add("info","Operating normally","Level, pump state and sensors are consistent with normal automatic operation.")
+        add("info","Operating normally","Level, pump state and sensors are consistent with normal automatic operation." if has_pump else "Level and flow readings are arriving and look consistent.")
     findings.sort(key=lambda f:SEVERITY_ORDER[f["severity"]])
 
+    prefix="Idle: tank" if has_pump else "Tank"
     if pump_on:
         trend=f"rising {rate:.1f}%/min" if rate is not None and rate>0.2 else "not yet rising" if rate is not None else "trend still building"
         headline=f"Refilling: tank at {level:.0f}%, {trend}"
     elif rate is not None and rate<-0.2:
-        headline=f"Idle: tank at {level:.0f}%, draining {-rate:.1f}%/min"
+        headline=f"{prefix} at {level:.0f}%, draining {-rate:.1f}%/min"
     elif rate is not None and rate>0.2:
-        headline=f"Idle: tank at {level:.0f}%, rising {rate:.1f}%/min from another inflow"
+        headline=f"{prefix} at {level:.0f}%, rising {rate:.1f}%/min"+(" from another inflow" if has_pump else "")
     else:
-        headline=f"Idle: tank at {level:.0f}%, holding steady"
+        headline=f"{prefix} at {level:.0f}%, holding steady"
 
-    parts=[f"The tank holds about {liters:,.0f} L of {capacity_liters:,.0f} L ({level:.0f}%)."]
-    if pump_on:
+    parts=[f"The tank holds about {liters:,.0f} L of {capacity_liters:,.0f} L ({level:.0f}%)." if has_pump else f"The tank is at {level:.0f}%."]
+    if not has_pump:
+        parts.append("No pump is wired to this station yet, so it reports level and flow only.")
+    elif pump_on:
         parts.append(f"The pump is running and has delivered {cycle_liters:,.1f} L in this cycle" + (f" over {_fmt_minutes(cycle_minutes)}." if cycle_minutes is not None else "."))
         parts.append(f"At the rated {flow_lpm:.0f} L/min it needs about {_fmt_minutes(minutes_to_full)} to reach the {HIGH_THRESHOLD:.0f}% stop point.")
     else:
         parts.append(f"The pump is off. It will start automatically at {LOW_THRESHOLD:.0f}%" + (f", roughly {_fmt_minutes(minutes_to_start)} from now at the current draw." if minutes_to_start is not None else "."))
-    parts.append(f"In the last 24 h the pump moved {pumped_24h:,.1f} L over {len(completed_24h)} completed cycle{'s' if len(completed_24h)!=1 else ''}.")
-    if duty is not None: parts.append(f"It ran {duty:.0f}% of the last hour.")
+    if has_pump:
+        parts.append(f"In the last 24 h the pump moved {pumped_24h:,.1f} L over {len(completed_24h)} completed cycle{'s' if len(completed_24h)!=1 else ''}.")
+        if duty is not None: parts.append(f"It ran {duty:.0f}% of the last hour.")
 
     top=findings[0]["severity"]
     status="offline" if last_seen>OFFLINE_AFTER_S else "fault" if top=="critical" else "attention" if top=="warning" else "normal"
@@ -124,6 +128,10 @@ def analyze_tank(*,now,capacity_liters,flow_lpm,readings,events,pump_on_fallback
         "critical":"Inspect the tank and pump now and confirm the controller and power before relying on automatic control.",
         "warning":"Check the pump inlet, valves and pipework at the next opportunity and keep watching the level trend.",
         "info":"No action needed. Automatic control is handling the tank.",
+    }[top] if has_pump else {
+        "critical":"Inspect the tank and check the sensor wiring.",
+        "warning":"Check the tank and keep watching the level trend.",
+        "info":"No action needed.",
     }[top]
     confidence=round(min(95.0,45+len(recent)*1.5+len(completed_24h)*4),1)
     return {**base,"status":status,"headline":headline,"summary":" ".join(parts),"findings":findings,"recommended_action":action,
