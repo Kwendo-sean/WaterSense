@@ -7,7 +7,7 @@ the ESP32 sensor rig.
 import sys
 from sqlalchemy import select, delete
 from .core import SessionLocal
-from .models import Station, TelemetryReading, RiskAssessment, Alert, Forecast, PumpEvent, PumpControl, PumpSchedule
+from .models import Station, TelemetryReading, RiskAssessment, Alert, Forecast, PumpEvent, PumpControl, PumpSchedule, AiFinding
 
 PROTOTYPE_CODE="WS-PROTOTYPE-01"
 PROTOTYPE=dict(station_code=PROTOTYPE_CODE,name="Breadboard Prototype",description="Arduino Uno tank level and pump controller",
@@ -33,7 +33,7 @@ def prune_to_prototype():
         ids=db.scalars(select(Station.id).where(Station.station_code.not_in(PROTOTYPE_CODES))).all()
         if ids:
             # Children first: RiskAssessment references readings, everything references stations.
-            for model in (Alert,RiskAssessment,Forecast,PumpEvent,PumpControl,PumpSchedule,TelemetryReading):
+            for model in (Alert,RiskAssessment,Forecast,PumpEvent,PumpControl,PumpSchedule,AiFinding,TelemetryReading):
                 db.execute(delete(model).where(model.station_id.in_(ids)))
             db.execute(delete(Station).where(Station.id.in_(ids)))
         for p in PROTOTYPES:

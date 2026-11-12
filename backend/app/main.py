@@ -15,6 +15,7 @@ from .services.risk import assess_risk
 from .services.forecast import calculate_forecast
 from .services.pump import evaluate_pump, predict_pump_schedule, daily_pump_stats, PUMP_FLOW_LPM
 from .services.tank_insights import analyze_tank
+from .services.finding_history import record_findings, finding_history
 from .services import pump_control
 from .seed import seed_database
 from .simulator import simulator
@@ -127,6 +128,8 @@ def _ingest_sync(payload: dict[str,Any]):
                 station.pump_status=new_pump_status
                 pump_changed={"station_id":station.id,"station_code":station.station_code,"pump_status":new_pump_status,"water_level_percent":level,"timestamp":iso(reading.timestamp)}
         pump_command,control_changed=_resolve_pump_command(db,station,level)
+        db.flush()
+        _maybe_record_findings(db,station,reading.timestamp)
         db.commit()
         rd=reading_dict(reading);ra=risk_dict(assessment);sd=station_dict(station)
     finally: db.close()
@@ -335,12 +338,38 @@ async def delete_pump_schedule(station_id:int,schedule_id:int,_:None=Depends(req
     await manager.broadcast("pump:control",{"station_id":station_id})
     return state
 
+FINDINGS_EVERY_S=10
+_findings_checked:dict[int,float]={}
+
+def _maybe_record_findings(db,station,now,insights=None):
+    """Log AI findings for hardware stations, at most every FINDINGS_EVERY_S.
+    Runs on ingest (so history builds with nobody watching) and on the
+    insights poll (the only place "Device offline" can be seen). Caller commits."""
+    if station.source_type not in ("arduino","esp32"):return False
+    t=time.monotonic()
+    if t-_findings_checked.get(station.id,0)<FINDINGS_EVERY_S:return False
+    _findings_checked[station.id]=t
+    record_findings(db,station.id,insights or _analyze_station(db,station,now),now)
+    return True
+
 @app.get("/api/v1/stations/{station_id}/insights")
 def station_insights(station_id:int,_:None=Depends(require_admin)):
     with SessionLocal() as db:
         station=db.get(Station,station_id)
         if not station:raise HTTPException(404,"Station not found")
         now=datetime.now(timezone.utc).replace(tzinfo=None)
+        out=_analyze_station(db,station,now)
+        if _maybe_record_findings(db,station,now,out):db.commit()
+        return {**out,"station_id":station.id,"generated_at":iso(out["generated_at"])}
+
+@app.get("/api/v1/stations/{station_id}/insights/history")
+def station_insights_history(station_id:int,hours:int=Query(24,ge=1,le=720),_:None=Depends(require_admin)):
+    with SessionLocal() as db:
+        if not db.get(Station,station_id):raise HTTPException(404,"Station not found")
+        return {"station_id":station_id,**finding_history(db,station_id,datetime.now(timezone.utc).replace(tzinfo=None),hours=hours)}
+
+def _analyze_station(db,station,now):
+        station_id=station.id
         # Plain columns, not ORM objects: this is polled every couple of seconds.
         cols=select(TelemetryReading.timestamp,TelemetryReading.water_level_percent,TelemetryReading.raw_payload).where(TelemetryReading.station_id==station_id).order_by(desc(TelemetryReading.timestamp))
         rows=db.execute(cols.where(TelemetryReading.timestamp>=now-timedelta(hours=1)).limit(4000)).all()
@@ -355,7 +384,7 @@ def station_insights(station_id:int,_:None=Depends(require_admin)):
             events=[{"triggered_at":e.triggered_at,"stopped_at":e.stopped_at,"volume_liters":e.volume_liters} for e in events],
             pump_on_fallback=station.pump_status=="on",
             has_pump=station.source_type!="esp32" or any(r["pump_on"] is not None for r in readings))
-        return {**out,"station_id":station.id,"generated_at":iso(out["generated_at"])}
+        return out
 
 @app.get("/api/v1/alerts")
 def alerts(resolved:bool|None=None,_:None=Depends(require_admin)):

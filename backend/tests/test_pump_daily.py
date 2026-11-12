@@ -94,3 +94,36 @@ def test_prune_keeps_only_the_prototype_in_nairobi():
         assert sorted(s.station_code for s in stations) == sorted(PROTOTYPE_CODES)
         assert {s.location_text for s in stations} == {"Nairobi, Kenya"}
         assert db.scalar(select(PumpEvent).where(PumpEvent.station_id.not_in([s.id for s in stations]))) is None
+
+
+def test_ai_findings_are_kept_as_episodes_with_evidence():
+    import app.main as main
+    from app.services.finding_history import record_findings
+    from app.models import AiFinding
+    with TestClient(app) as client:
+        sid = next(s["id"] for s in client.get("/api/v1/stations", headers=ADMIN).json() if s["station_code"] == "WS-PROTOTYPE-02")
+        main._findings_checked.pop(sid, None)
+        client.post("/api/v1/telemetry", json={"station_code": "WS-PROTOTYPE-02", "metrics": {"water_level_percent": 50},
+                    "device": {"source": "esp32", "pump_on": False, "pump_run_ms": 0, "water_contact": True}})
+        hist = client.get(f"/api/v1/stations/{sid}/insights/history", headers=ADMIN).json()
+        leak = next(i for i in hist["items"] if i["title"] == "Water detected at the tank base")
+        assert leak["active"] and leak["severity"] == "critical" and leak["context"]["level_percent"] == 50
+        assert "Operating normally" not in [i["title"] for i in hist["items"]]
+        assert any(t["title"] == leak["title"] and t["episodes"] >= 1 for t in hist["by_title"])
+        assert client.get(f"/api/v1/stations/{sid}/insights/history").status_code == 401
+
+    with SessionLocal() as db:
+        row = db.get(AiFinding, leak["id"])
+        start = row.last_seen
+        # Still present a moment later: same episode, one more confirmation.
+        record_findings(db, sid, {"findings": [{"severity": "critical", "title": leak["title"], "detail": "still wet"}]}, start + timedelta(seconds=10))
+        db.commit(); db.refresh(row)
+        assert row.checks == 2 and row.last_detail == "still wet" and row.resolved_at is None
+        # Gone, but within the grace period: stays open.
+        record_findings(db, sid, {"findings": []}, start + timedelta(seconds=30))
+        db.commit(); db.refresh(row)
+        assert row.resolved_at is None
+        # Gone past the grace period: closed at the last time it was confirmed.
+        record_findings(db, sid, {"findings": []}, start + timedelta(seconds=200))
+        db.commit(); db.refresh(row)
+        assert row.resolved_at == start + timedelta(seconds=10)

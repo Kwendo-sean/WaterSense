@@ -5,6 +5,7 @@ import {Area,AreaChart,CartesianGrid,ReferenceLine,ResponsiveContainer,Tooltip,X
 import {ArrowLeft,BrainCircuit,CalendarClock,Clock,Droplet,Maximize2,Minimize2,Power,Radio,ShieldAlert,X} from "lucide-react";
 import {api} from "../api";
 import {Disclaimer,fmt,LiveSocket,Logo} from "../components/Shared";
+import FindingHistory from "../components/FindingHistory";
 
 const START_PERCENT=20, STOP_PERCENT=85;
 const STATUS_PILL:Record<string,[string,string]>={normal:["safe","NORMAL"],attention:["warning","ATTENTION"],fault:["critical","FAULT"],offline:["watch","OFFLINE"],no_data:["watch","NO DATA"]};
@@ -162,7 +163,8 @@ export default function HardwareStation({id,station,reading}:{id:number;station:
 
   const rows=(history.data||[]).filter((r:any)=>r.source==="arduino"||r.source==="esp32");
   // The ESP32 rig reports sensors only until a pump is wired to it.
-  const hasPump=reading.source!=="esp32"||reading.pump_on!=null;
+  const esp32=reading.source==="esp32";
+  const hasPump=!esp32||reading.pump_on!=null;
   const level=reading.water_level_percent??0;
   const capacity=station.pump_capacity_liters;
   const pumpOn=reading.pump_on??station.pump_status==="on";
@@ -184,7 +186,7 @@ export default function HardwareStation({id,station,reading}:{id:number;station:
       <div>
         <span>{station.station_code} · <i>LIVE HARDWARE</i></span>
         <h1>{station.name}</h1>
-        <p>{station.location_text} / {hasPump?"ARDUINO UNO · AUTOMATIC PUMP CONTROLLER":"ESP32-S3 · LEVEL AND FLOW SENSORS"}</p>
+        <p>{station.location_text} / {!esp32?"ARDUINO UNO · AUTOMATIC PUMP CONTROLLER":hasPump?"ESP32-S3 · AUTOMATIC PUMP CONTROLLER (SERVO STANDS IN FOR THE PUMP)":"ESP32-S3 · LEVEL AND FLOW SENSORS"}</p>
       </div>
       <div className={`station-risk ${pillClass}`}>
         <span className={`status status-${pillClass}`}><i/>{pillLabel}</span>
@@ -202,11 +204,13 @@ export default function HardwareStation({id,station,reading}:{id:number;station:
     </section>}
 
     {hasPump&&<section className="telemetry-blocks hw-sensors">
-      <div className="telemetry-block"><span>WATER LEVEL</span><div><b>{fmt(level,0)}</b><small>%</small></div><svg viewBox="0 0 160 30"><path d={sparkPath(levelSeries)}/></svg><p><i/> RAW ADC {reading.level_raw??"—"}</p></div>
+      <div className="telemetry-block"><span>WATER LEVEL</span><div><b>{fmt(level,0)}</b><small>%</small></div><svg viewBox="0 0 160 30"><path d={sparkPath(levelSeries)}/></svg><p><i/> {esp32?`${reading.distance_cm==null?"NO ECHO":`${fmt(reading.distance_cm,1)} CM TO WATER`}`:`RAW ADC ${reading.level_raw??"—"}`}</p></div>
       <div className="telemetry-block"><span>WATER IN TANK</span><div><b>{Math.round(level/100*capacity).toLocaleString()}</b><small>L</small></div><p className="hw-sub">of {capacity.toLocaleString()} L capacity</p></div>
       <div className={`telemetry-block hw-pump ${pumpOn?"on":""}`}><span>PUMP MOTOR</span><div><b>{pumpOn?"ON":"OFF"}</b></div><p className="hw-sub">{pumpOn?`running ${duration(cycleMs)}`:reading.pump_mode==="0"?"held off from dashboard":`starts at ≤${START_PERCENT}%`}</p></div>
       <div className={`telemetry-block ${reading.water_contact?"hw-alert":""}`}><span>WATER CONTACT</span><div><b>{reading.water_contact==null?"—":reading.water_contact?"WET":"DRY"}</b></div><p className="hw-sub">base leak sensor</p></div>
-      <div className="telemetry-block"><span>MOTION</span><div><b>{reading.motion==null?"—":reading.motion?"YES":"NONE"}</b></div><p className="hw-sub">{reading.motion==null?"PIR warming up":"PIR sensor"}</p></div>
+      {esp32
+        ?<div className={`telemetry-block hw-pump ${reading.flow_rate_l_min>0?"on":""}`}><span>WATER FLOW</span><div><b>{fmt(reading.flow_rate_l_min,1)}</b><small>L/min</small></div><p className="hw-sub">YF-S201 · {fmt(reading.flow_total_liters,2)} L since restart</p></div>
+        :<div className="telemetry-block"><span>MOTION</span><div><b>{reading.motion==null?"—":reading.motion?"YES":"NONE"}</b></div><p className="hw-sub">{reading.motion==null?"PIR warming up":"PIR sensor"}</p></div>}
     </section>}
 
     {hasPump&&<section className="pump-panel lead">
@@ -256,6 +260,8 @@ export default function HardwareStation({id,station,reading}:{id:number;station:
       </section>
     </div>
 
+    <FindingHistory id={id}/>
+
     <div className="station-grid lower hw-only">
       <section className="device-log">
         <div className="pump-head"><Radio/><span>LIVE TELEMETRY LOG</span><i className="log-pulse"/></div>
@@ -267,7 +273,7 @@ export default function HardwareStation({id,station,reading}:{id:number;station:
       <section className="device-card">
         <Radio/><span>CONNECTION</span>
         <strong>{ai?.metrics?.last_seen_seconds!=null&&ai.metrics.last_seen_seconds>30?"OFFLINE":"LIVE HARDWARE"}</strong>
-        <p>{hasPump?"Arduino Uno over USB serial, about 2 readings per second":"ESP32-S3 over USB serial, about 1 reading per second"}</p>
+        <p>{!esp32?"Arduino Uno over USB serial, about 2 readings per second":"ESP32-S3 over USB serial, about 1 reading per second"}</p>
         <p>Last reading {clock(reading.timestamp)}</p>
         {hasPump&&<p>Pump ran {ai?.metrics?.duty_cycle_percent_1h!=null?`${fmt(ai.metrics.duty_cycle_percent_1h,0)}%`:"—"} of the last hour</p>}
       </section>

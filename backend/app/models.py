@@ -143,3 +143,22 @@ class PumpSchedule(Base):
     # tank), so a window never re-runs the same day.
     done_on: Mapped[str|None]=mapped_column(String, nullable=True)
     created_at: Mapped[datetime]=mapped_column(DateTime, default=now)
+
+class AiFinding(Base):
+    """One episode of a WaterSense AI finding: from the first analysis that
+    raised it until it has been absent for a grace period. Gives the dashboard
+    a history of what the AI flagged, with the evidence at the time."""
+    __tablename__="ai_findings"
+    __table_args__=(Index("ix_ai_findings_station_open","station_id","resolved_at"),)
+    id: Mapped[int]=mapped_column(primary_key=True)
+    station_id: Mapped[int]=mapped_column(ForeignKey("stations.id"), index=True)
+    title: Mapped[str]=mapped_column(String)
+    severity: Mapped[str]=mapped_column(String)          # highest severity seen in the episode
+    first_detail: Mapped[str]=mapped_column(String)      # evidence when first raised
+    last_detail: Mapped[str]=mapped_column(String)       # latest evidence
+    first_seen: Mapped[datetime]=mapped_column(DateTime, default=now)
+    last_seen: Mapped[datetime]=mapped_column(DateTime, default=now)
+    resolved_at: Mapped[datetime|None]=mapped_column(DateTime, nullable=True)
+    checks: Mapped[int]=mapped_column(Integer, default=1)  # analyses that confirmed it
+    context: Mapped[dict]=mapped_column(JSON, default=dict) # level, pump state, rate when first raised
+    action: Mapped[str|None]=mapped_column(String, nullable=True)  # recommendation at the time
