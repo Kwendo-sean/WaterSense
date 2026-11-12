@@ -288,7 +288,7 @@ def _control_state(db,station):
     raw=db.scalar(select(TelemetryReading.raw_payload).where(TelemetryReading.station_id==station.id).order_by(desc(TelemetryReading.timestamp)).limit(1))
     def sched(s):
         nxt=pump_control.next_run(s,now_local)
-        return {"id":s.id,"start_time":s.start_time,"duration_minutes":s.duration_minutes,"repeat":s.repeat,
+        return {"id":s.id,"start_time":s.start_time,"duration_minutes":s.duration_minutes,"repeat":s.repeat,"run_date":s.run_date,
                 "running":bool(active and active[0].id==s.id),"next_run":nxt.isoformat() if nxt else None}
     state={"station_id":station.id,"mode":control.mode if control else "auto","command":command,
            "device_mode":((raw or {}).get("device") or {}).get("pump_mode"),
@@ -321,8 +321,14 @@ async def add_pump_schedule(station_id:int,data:PumpScheduleIn,_:None=Depends(re
     with SessionLocal() as db:
         station=_station_or_404(db,station_id)
         now_local=pump_control.local_now(datetime.now(timezone.utc).replace(tzinfo=None))
-        run_date=pump_control.first_run_date(data.start_time,data.duration_minutes,now_local) if data.repeat=="once" else None
-        db.add(PumpSchedule(station_id=station_id,run_date=run_date,**data.model_dump()));db.commit()
+        run_date=None
+        if data.repeat=="once" and data.run_date:
+            problem=pump_control.check_run_date(data.run_date,data.start_time,data.duration_minutes,now_local)
+            if problem:raise HTTPException(422,problem)
+            run_date=data.run_date
+        elif data.repeat=="once":
+            run_date=pump_control.first_run_date(data.start_time,data.duration_minutes,now_local)
+        db.add(PumpSchedule(station_id=station_id,run_date=run_date,**data.model_dump(exclude={"run_date"})));db.commit()
         state=_control_state(db,station)
     await manager.broadcast("pump:control",{"station_id":station_id})
     return state

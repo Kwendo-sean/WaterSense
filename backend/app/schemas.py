@@ -108,3 +108,6 @@ class PumpScheduleIn(BaseModel):
     start_time: str=Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
     duration_minutes: int=Field(ge=1, le=720)
     repeat: Literal["once","daily"]="once"
+    # Site-local date for a one-off run, up to SCHEDULE_MAX_DAYS ahead. Omitted:
+    # the next occurrence of start_time (today, or tomorrow if it has passed).
+    run_date: str|None=Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")

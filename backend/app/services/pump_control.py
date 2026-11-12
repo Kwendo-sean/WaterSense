@@ -26,6 +26,18 @@ def first_run_date(hhmm, duration_minutes, now_local):
     if start+timedelta(minutes=duration_minutes)<=now_local: start+=timedelta(days=1)
     return start.date().isoformat()
 
+SCHEDULE_MAX_DAYS=31
+
+def check_run_date(run_date, hhmm, duration_minutes, now_local):
+    """Validate an operator-chosen one-off date. Returns an error message or None."""
+    try: day=datetime.fromisoformat(run_date).date()
+    except ValueError: return "Not a valid date."
+    if day>now_local.date()+timedelta(days=SCHEDULE_MAX_DAYS):
+        return f"Schedules can be set up to {SCHEDULE_MAX_DAYS} days ahead."
+    if _start(day,hhmm,now_local.tzinfo)+timedelta(minutes=duration_minutes)<=now_local:
+        return "That time has already passed."
+    return None
+
 def window(schedule, now_local):
     """(start, end) of the schedule window containing now_local, else None."""
     span=timedelta(minutes=schedule.duration_minutes)

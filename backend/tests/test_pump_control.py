@@ -112,3 +112,22 @@ def test_one_off_schedule_expires_after_its_window():
     s = _sched("08:00", 30, repeat="once", run_date="2026-10-25")
     command, active, changed = pump_control.resolve(None, [s], 50, now)
     assert command == "A" and active is None and changed and not s.enabled
+
+
+def test_one_off_schedule_on_a_chosen_date_within_a_month():
+    with TestClient(app) as client:
+        sid = _station(client, "WS-TEST-CTRL-DATE")["id"]
+        today = datetime.now(TZ).date()
+        post = lambda body: client.post(f"/api/v1/stations/{sid}/pump/schedules", headers=ADMIN, json=body)
+
+        r = post({"start_time": "07:30", "duration_minutes": 15, "repeat": "once", "run_date": (today + timedelta(days=20)).isoformat()})
+        assert r.status_code == 201
+        item = r.json()["schedules"][-1]
+        assert item["run_date"] == (today + timedelta(days=20)).isoformat()
+        assert item["next_run"].startswith(f"{(today + timedelta(days=20)).isoformat()}T07:30")
+
+        too_far = post({"start_time": "07:30", "duration_minutes": 15, "repeat": "once", "run_date": (today + timedelta(days=32)).isoformat()})
+        assert too_far.status_code == 422 and "31 days" in too_far.json()["detail"]
+        past = post({"start_time": "07:30", "duration_minutes": 15, "repeat": "once", "run_date": (today - timedelta(days=1)).isoformat()})
+        assert past.status_code == 422 and "passed" in past.json()["detail"]
+        assert post({"start_time": "07:30", "duration_minutes": 15, "run_date": "2026-13-40"}).status_code == 422

@@ -14,6 +14,8 @@ const COMMAND_LABEL:Record<string,string>={A:"AUTOMATIC",1:"MANUAL ON",0:"MANUAL
 
 function inMinutes(n:number){const d=new Date(Date.now()+n*60000);return `${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`}
 
+const MAX_SCHEDULE_DAYS=31;  // matches SCHEDULE_MAX_DAYS on the backend
+function localDate(offsetDays:number){const d=new Date(Date.now()+offsetDays*86400000);return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`}
 function PumpControls({id,reading}:{id:number;reading:any}){
   const qc=useQueryClient();
   const control=useQuery({queryKey:["pumpControl",id],queryFn:()=>api.pumpControl(id),refetchInterval:15000});
@@ -24,6 +26,7 @@ function PumpControls({id,reading}:{id:number;reading:any}){
   const [start,setStart]=useState(()=>inMinutes(1));
   const [minutes,setMinutes]=useState(5);
   const [repeat,setRepeat]=useState("once");
+  const [day,setDay]=useState(()=>localDate(0));
 
   const c=control.data;
   const mode=c?.mode??"auto";
@@ -41,8 +44,9 @@ function PumpControls({id,reading}:{id:number;reading:any}){
     </div>
     <p className="pump-control-hint">{mode==="on"?"Manual ON fills the tank and hands back to AUTO when it reaches 100%.":mode==="off"?"Manual OFF holds the motor off, even if the tank runs low or a schedule is due.":"AUTO runs the motor at ≤20% and stops it at ≥85%. Schedules below run on top of this."}</p>
 
-    <form className="pump-schedule-form" onSubmit={e=>{e.preventDefault();addSchedule.mutate({start_time:start,duration_minutes:minutes,repeat})}}>
+    <form className="pump-schedule-form" onSubmit={e=>{e.preventDefault();addSchedule.mutate({start_time:start,duration_minutes:minutes,repeat,...(repeat==="once"?{run_date:day}:{})})}}>
       <span className="pump-control-label"><CalendarClock/> SCHEDULE A RUN</span>
+      {repeat==="once"&&<label>DATE<input type="date" required min={localDate(0)} max={localDate(MAX_SCHEDULE_DAYS)} value={day} onChange={e=>setDay(e.target.value)}/></label>}
       <label>START<input type="time" required value={start} onChange={e=>setStart(e.target.value)}/></label>
       <label>FOR<input type="number" min={1} max={720} required value={minutes} onChange={e=>setMinutes(Number(e.target.value))}/><small>min</small></label>
       <label>REPEAT<select value={repeat} onChange={e=>setRepeat(e.target.value)}><option value="once">Once</option><option value="daily">Every day</option></select></label>
@@ -50,8 +54,8 @@ function PumpControls({id,reading}:{id:number;reading:any}){
     </form>
     {c?.schedules?.length>0&&<div className="pump-schedules">
       {c.schedules.map((s:any)=><div key={s.id} className={s.running?"running":""}>
-        <b>{s.start_time}</b><span>{s.duration_minutes} min · {s.repeat==="daily"?"every day":"once"}</span>
-        <em>{s.running?"RUNNING NOW":s.next_run?`next ${new Date(s.next_run).toLocaleString([],{weekday:"short",hour:"2-digit",minute:"2-digit"})}`:""}</em>
+        <b>{s.start_time}</b><span>{s.duration_minutes} min · {s.repeat==="daily"?"every day":s.run_date?`once · ${new Date(`${s.run_date}T00:00`).toLocaleDateString([],{weekday:"short",day:"numeric",month:"short"})}`:"once"}</span>
+        <em>{s.running?"RUNNING NOW":s.next_run?`next ${new Date(s.next_run).toLocaleString([],{weekday:"short",day:"numeric",month:"short",hour:"2-digit",minute:"2-digit"})}`:""}</em>
         <button aria-label="Delete schedule" onClick={()=>removeSchedule.mutate(s.id)}><X/></button>
       </div>)}
     </div>}
