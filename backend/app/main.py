@@ -32,7 +32,7 @@ def station_dict(s):
 def pump_event_dict(e):
     return {"id":e.id,"station_id":e.station_id,"triggered_at":iso(e.triggered_at),"trigger_level":e.trigger_level,"stopped_at":iso(e.stopped_at),"stop_level":e.stop_level,"volume_liters":e.volume_liters}
 
-DEVICE_STATE_KEYS=("pump_on","pump_run_ms","level_raw","water_contact","motion","pump_mode","flow_lpm","distance_cm","flow_total_liters")
+DEVICE_STATE_KEYS=("pump_on","pump_run_ms","level_raw","water_contact","motion","pump_mode","flow_lpm","distance_cm","flow_total_liters","level_simulated")
 
 def device_state(r):
     d=(r.raw_payload or {}).get("device") or {}

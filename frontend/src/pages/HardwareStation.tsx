@@ -190,7 +190,7 @@ export default function HardwareStation({id,station,reading}:{id:number;station:
       <div>
         <span>{station.station_code} · <i>LIVE HARDWARE</i></span>
         <h1>{station.name}</h1>
-        <p>{station.location_text} / {!esp32?"ARDUINO UNO · AUTOMATIC PUMP CONTROLLER":hasPump?"ESP32-S3 · AUTOMATIC PUMP CONTROLLER (SERVO STANDS IN FOR THE PUMP)":"ESP32-S3 · LEVEL AND FLOW SENSORS"}</p>
+        <p>{station.location_text} / {!esp32?"ARDUINO UNO · AUTOMATIC PUMP CONTROLLER":hasPump?`ESP32-S3 · AUTOMATIC PUMP CONTROLLER · RELAY + MINI PUMP${reading.level_simulated?" · LEVEL RISE SIMULATED WHILE PUMPING":""}`:"ESP32-S3 · LEVEL AND FLOW SENSORS"}</p>
       </div>
       <div className={`station-risk ${pillClass}`}>
         <span className={`status status-${pillClass}`}><i/>{pillLabel}</span>
@@ -208,7 +208,7 @@ export default function HardwareStation({id,station,reading}:{id:number;station:
     </section>}
 
     {hasPump&&<section className="telemetry-blocks hw-sensors">
-      <div className="telemetry-block"><span>WATER LEVEL</span><div><b>{fmt(level,0)}</b><small>%</small></div><svg viewBox="0 0 160 30"><path d={sparkPath(levelSeries)}/></svg><p><i/> {esp32?`${reading.distance_cm==null?"NO ECHO":`${fmt(reading.distance_cm,1)} CM TO WATER`}`:`RAW ADC ${reading.level_raw??"—"}`}</p></div>
+      <div className="telemetry-block"><span>WATER LEVEL</span><div><b>{fmt(level,0)}</b><small>%</small></div><svg viewBox="0 0 160 30"><path d={sparkPath(levelSeries)}/></svg><p><i/> {esp32?`${reading.level_simulated?"SIMULATED FILL · sensor ":""}${reading.distance_cm==null?"NO ECHO":`${fmt(reading.distance_cm,1)} CM TO WATER`}`:`RAW ADC ${reading.level_raw??"—"}`}</p></div>
       <div className="telemetry-block"><span>WATER IN TANK</span><div><b>{Math.round(level/100*capacity).toLocaleString()}</b><small>L</small></div><p className="hw-sub">of {capacity.toLocaleString()} L capacity</p></div>
       <div className={`telemetry-block hw-pump ${pumpOn?"on":""}`}><span>PUMP MOTOR</span><div><b>{pumpOn?"ON":"OFF"}</b></div><p className="hw-sub">{pumpOn?`running ${duration(cycleMs)}`:reading.pump_mode==="0"?"held off from dashboard":`starts at ≤${START_PERCENT}%`}</p></div>
       <div className={`telemetry-block ${reading.water_contact?"hw-alert":""}`}><span>WATER CONTACT</span><div><b>{reading.water_contact==null?"—":reading.water_contact?"WET":"DRY"}</b></div><p className="hw-sub">base leak sensor</p></div>

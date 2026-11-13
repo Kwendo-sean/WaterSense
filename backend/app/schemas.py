@@ -33,6 +33,7 @@ class Device(BaseModel):
     # Raw ultrasonic reading and flow-meter total since boot (ESP32 rig).
     distance_cm: float|None=Field(None, ge=0, le=1000)
     flow_total_liters: float|None=Field(None, ge=0)
+    level_simulated: bool|None=None  # level includes a demo fill estimate, not only the sensor
 class TelemetryIn(BaseModel):
     station_code: str
     timestamp: datetime|None=None

@@ -71,6 +71,16 @@ const int PUMP_STOP_PERCENT = 85;
 // Even a manual or scheduled run stops here, so the bucket can't overflow.
 const int HARD_STOP_PERCENT = 95;
 
+// -------- DEMO FILL (simulated) --------
+// Like Prototype 1: while the pump runs the level rises at a pump-like rate,
+// then drains back to the real sensor reading after it stops, so the tank
+// cycles on its own for a table demo. Never lower than the sensor, so real
+// water always wins. Flagged as level_simulated in the telemetry and as
+// "SIM" on the OLED. Set to false to show the sensor only.
+const bool SIMULATED_FILL = true;
+const float SIM_FILL_PERCENT_PER_S = 4.0;   // about 1.2 L/min into the 0.5 L bottle
+const float SIM_DRAIN_PERCENT_PER_S = 1.0;  // stands in for water being used
+
 // -------- PUMP SAFETY --------
 // No single run may last longer than this. If it does, something is wrong
 // (sensor not seeing the rise, pump dry, hose off) and the pump locks out
@@ -115,7 +125,9 @@ int sampleIndex = 0;
 int missedEchoes = MAX_MISSED_ECHOES;
 
 float distanceCm = -1;
-int levelPercent = 0;
+int levelPercent = 0;     // what the controller acts on and reports
+int sensorPercent = 0;    // straight from the ultrasonic
+float simLevel = -1;      // demo fill level, -1 when inactive
 float flowLpm = 0;
 float totalLitres = 0;
 uint32_t totalPulses = 0;
@@ -204,7 +216,27 @@ void updateLevel() {
 
   distanceCm = medianDistance();
   float percent = (TANK_EMPTY_CM - distanceCm) / (TANK_EMPTY_CM - TANK_FULL_CM) * 100.0;
-  levelPercent = constrain((int)(percent + 0.5), 0, 100);
+  sensorPercent = constrain((int)(percent + 0.5), 0, 100);
+  levelPercent = sensorPercent;
+}
+
+bool simActive() {
+  return simLevel >= 0;
+}
+
+void applySimulatedFill(float dtSeconds) {
+  if (!SIMULATED_FILL || !probeInTank() || pumpFault) {
+    simLevel = -1;
+    return;
+  }
+  if (pumpOn) {
+    if (!simActive()) simLevel = sensorPercent;
+    simLevel = min(100.0f, simLevel + SIM_FILL_PERCENT_PER_S * dtSeconds);
+  } else if (simActive()) {
+    simLevel -= SIM_DRAIN_PERCENT_PER_S * dtSeconds;
+    if (simLevel <= sensorPercent) simLevel = -1;  // back to the real reading
+  }
+  levelPercent = simActive() ? max(sensorPercent, (int)(simLevel + 0.5)) : sensorPercent;
 }
 
 void updateLeak() {
@@ -430,6 +462,8 @@ void sendTelemetry() {
   Serial.print(pumpLpm, 2);
   Serial.print(",\"water_contact\":");
   Serial.print(leakDetected ? "true" : "false");
+  Serial.print(",\"level_simulated\":");
+  Serial.print(simActive() ? "true" : "false");
   if (distanceCm >= 0) {
     Serial.print(",\"distance_cm\":");
     Serial.print(distanceCm, 1);
@@ -448,7 +482,7 @@ const char* statusText() {
   if (distanceCm < 0) return "NO SIGNAL";
   if (distanceCm < BLIND_ZONE_CM) return "TOO CLOSE";
   if (!probeInTank()) return "AIM PROBE";  // 9 chars max fits beside the title
-  if (pumpOn) return "FILLING";
+  if (pumpOn) return simActive() ? "SIM FILL" : "FILLING";
   if (levelPercent <= PUMP_START_PERCENT) return "LOW";
   if (levelPercent >= PUMP_STOP_PERCENT) return "FULL";
   return "NORMAL";
@@ -562,7 +596,7 @@ void drawReadings() {
 
   oled.setFont(u8g2_font_5x8_tr);
   if (probeInTank()) {
-    snprintf(text, sizeof(text), "%dml", (int)(TANK_CAPACITY_L * 1000 * levelPercent / 100.0 + 0.5));
+    snprintf(text, sizeof(text), simActive() ? "SIM %dml" : "%dml", (int)(TANK_CAPACITY_L * 1000 * levelPercent / 100.0 + 0.5));
     drawRightAligned(22, text);
   }
   if (distanceCm >= 0) snprintf(text, sizeof(text), "%.0fcm", distanceCm);
@@ -684,6 +718,7 @@ void loop() {
   if (now - lastRead >= READ_INTERVAL_MS) {
     lastRead = now;
     updateLevel();
+    applySimulatedFill(READ_INTERVAL_MS / 1000.0);
     updateLeak();
     clearFaults();
     updatePump();
