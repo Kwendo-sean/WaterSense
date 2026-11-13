@@ -16,7 +16,7 @@ PROTOTYPE=dict(station_code=PROTOTYPE_CODE,name="Breadboard Prototype",descripti
 # Sits a little away from the first so the two map pins don't overlap.
 PROTOTYPE_2=dict(station_code="WS-PROTOTYPE-02",name="ESP32 Sensor Prototype",description="ESP32-S3 ultrasonic level and flow sensors",
                  station_type="tank",latitude=-1.2921,longitude=36.8219,location_text="Nairobi, Kenya",source_type="esp32",
-                 pump_capacity_liters=20.0)
+                 pump_capacity_liters=0.5)  # 700 ml demo bottle, 0.5 L between the marks
 PROTOTYPES=(PROTOTYPE,PROTOTYPE_2)
 PROTOTYPE_CODES=tuple(p["station_code"] for p in PROTOTYPES)
 

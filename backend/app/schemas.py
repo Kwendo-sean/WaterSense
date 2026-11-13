@@ -52,6 +52,7 @@ class StationPatch(BaseModel):
     description: str|None=None
     status: str|None=None
     location_text: str|None=None
+    pump_capacity_liters: float|None=Field(None, gt=0, le=1_000_000)
 
 # -------- Market research survey --------
 Location=Literal["Nairobi","Another part of Kenya","Outside Kenya"]

@@ -11,3 +11,4 @@ dist/
 .venv/
 .vscode/
 .arduino-build/
+wifi_secrets.h

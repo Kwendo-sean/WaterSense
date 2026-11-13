@@ -54,15 +54,16 @@ const int SERVO_STEP = 4;          // degrees per 20 ms: about 1.4 s per sweep
 // Distance from the sensor down to the water surface. Measure both on the
 // real container. TANK_FULL_CM must stay above BLIND_ZONE_CM.
 #if USE_HCSR04
-const float TANK_EMPTY_CM = 30.0;
-const float TANK_FULL_CM = 8.0;
+const float TANK_EMPTY_CM = 15.0;  // measured: empty 700 ml bottle read 15.1 cm (13 Nov)
+const float TANK_FULL_CM = 5.0;    // closest reliable reading; half full read 8.4 cm
 #else
 const float TANK_EMPTY_CM = 30.0;  // JSN-SR04T in a 30 cm rig: only 8 cm of usable travel
 const float TANK_FULL_CM = 22.0;
 #endif
 const float OUT_OF_TANK_MARGIN_CM = 10.0;
-// Placeholder, matches pump_capacity_liters on the backend.
-const float TANK_CAPACITY_L = 20.0;
+// About 0.5 L between the empty and full marks of the 700 ml demo bottle;
+// matches pump_capacity_liters on the backend.
+const float TANK_CAPACITY_L = 0.5;
 
 // Same thresholds as Prototype 1 and the backend.
 const int PUMP_START_PERCENT = 20;
@@ -184,7 +185,9 @@ float medianDistance() {
 void updateLevel() {
   float reading = measureDistance();
 
-  if (reading < 0 || reading > MAX_RANGE_CM) {
+  // Inside the blind zone the sensor reports false echoes (2-5 cm on 3.3 V),
+  // which would read as a full tank and stop the pump. Treat them as misses.
+  if (reading < BLIND_ZONE_CM || reading > MAX_RANGE_CM) {
     if (missedEchoes < MAX_MISSED_ECHOES) missedEchoes++;
     if (missedEchoes >= MAX_MISSED_ECHOES) {
       sampleCount = 0;
@@ -297,10 +300,23 @@ void updateServo(unsigned long now) {
 // ============================================
 // PUMP CONTROL
 // ============================================
+// The relay board runs on 5 V, so a 3.3 V HIGH can still leak enough current
+// through its opto-coupler to hold the relay on. For OFF the pin is released
+// (high impedance) and the board's own pull-up switches the relay off; for ON
+// it is driven LOW.
+void relayWrite(bool on) {
+  if (on) {
+    digitalWrite(RELAY_PIN, LOW);
+    pinMode(RELAY_PIN, OUTPUT);
+  } else {
+    pinMode(RELAY_PIN, INPUT);
+  }
+}
+
 void setPump(bool on) {
   if (on == pumpOn) return;
   pumpOn = on;
-  digitalWrite(RELAY_PIN, on ? RELAY_ON : RELAY_OFF);
+  relayWrite(on);
   if (on) {
     pumpStartedAt = millis();
     play({{1320, 80}, {0, 40}, {1760, 120}});    // rising chirp
@@ -546,7 +562,7 @@ void drawReadings() {
 
   oled.setFont(u8g2_font_5x8_tr);
   if (probeInTank()) {
-    snprintf(text, sizeof(text), "%.1fL", TANK_CAPACITY_L * levelPercent / 100.0);
+    snprintf(text, sizeof(text), "%dml", (int)(TANK_CAPACITY_L * 1000 * levelPercent / 100.0 + 0.5));
     drawRightAligned(22, text);
   }
   if (distanceCm >= 0) snprintf(text, sizeof(text), "%.0fcm", distanceCm);
@@ -609,10 +625,8 @@ void drawSplash() {
 // SETUP / LOOP
 // ============================================
 void setup() {
-  // Relay off before the pin becomes an output, so the pump never twitches at boot.
-  digitalWrite(RELAY_PIN, RELAY_OFF);
-  pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(RELAY_PIN, RELAY_OFF);
+  // Relay released (off) from the first instruction, so the pump never twitches at boot.
+  relayWrite(false);
 
   Serial.begin(115200);
 
